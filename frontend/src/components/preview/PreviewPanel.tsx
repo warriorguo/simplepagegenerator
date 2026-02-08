@@ -17,7 +17,7 @@ export default function PreviewPanel({ projectId }: Props) {
         <iframe
           key={previewUrl}
           src={previewUrl}
-          sandbox="allow-scripts"
+          sandbox="allow-scripts allow-same-origin"
           className="preview-frame"
           title="Preview"
         />

@@ -1,6 +1,6 @@
 SANDBOX_CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:;"
 
-SANDBOX_ATTRS = "allow-scripts"
+SANDBOX_ATTRS = "allow-scripts allow-same-origin"
 
 MIME_TYPES = {
     ".html": "text/html",
