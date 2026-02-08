@@ -11,6 +11,7 @@ from app.pipeline.fix_agent import fix_errors
 from app.services.build_service import validate_build
 from app.services.version_service import create_version
 from app.services.chat_service import get_or_create_thread, add_message
+from app.services.memory_service import get_relevant_memories_for_prompt, extract_memories_from_conversation, create_memory
 from app.utils.sse import sse_stage_change, sse_build_status, sse_token, sse_error, sse_done
 
 MAX_FIX_RETRIES = 3
@@ -45,10 +46,17 @@ async def run_pipeline(
 ) -> AsyncGenerator[str, None]:
     """Run the 4-stage prompt pipeline. Yields SSE-formatted events."""
 
+    # Retrieve relevant memories for this message
+    memories_context = ""
+    try:
+        memories_context = await get_relevant_memories_for_prompt(db, client, project_id, message)
+    except Exception:
+        pass  # Graceful degradation — continue without memories
+
     # Stage 1: Intent Parsing
     yield sse_stage_change("intent_parser")
     try:
-        intent = await parse_intent(client, message, history)
+        intent = await parse_intent(client, message, history, memories_context)
     except Exception as e:
         yield sse_error(f"Intent parsing failed: {e}")
         yield sse_done()
@@ -84,7 +92,7 @@ async def run_pipeline(
     # Stage 2: Planning
     yield sse_stage_change("planner")
     try:
-        plan = await create_plan(client, intent.model_dump_json(), current_files)
+        plan = await create_plan(client, intent.model_dump_json(), current_files, memories_context)
     except Exception as e:
         yield sse_error(f"Planning failed: {e}")
         yield sse_done()
@@ -102,7 +110,7 @@ async def run_pipeline(
     yield sse_stage_change("builder")
     file_ops = []
     try:
-        async for event in execute_build(client, plan.model_dump_json(), current_files):
+        async for event in execute_build(client, plan.model_dump_json(), current_files, memories_context):
             if isinstance(event, dict) and "__file_ops__" in event:
                 file_ops = event["__file_ops__"]
             elif isinstance(event, str):
@@ -134,7 +142,7 @@ async def run_pipeline(
             if attempt < MAX_FIX_RETRIES:
                 yield sse_stage_change("fix_agent")
                 try:
-                    async for event in fix_errors(client, build_result.errors, updated_files):
+                    async for event in fix_errors(client, build_result.errors, updated_files, memories_context):
                         if isinstance(event, dict) and "__file_ops__" in event:
                             fix_ops = event["__file_ops__"]
                             updated_files = apply_file_ops(updated_files, fix_ops)
@@ -158,6 +166,15 @@ async def run_pipeline(
             build_log="\n".join(build_result.errors) if build_result.errors else None,
         )
         yield sse_done(version.id)
+
+        # Auto-extract memories after successful build
+        if build_result.success:
+            try:
+                facts = await extract_memories_from_conversation(client, message, history, updated_files)
+                for fact in facts:
+                    await create_memory(db, client, project_id, fact, source="auto")
+            except Exception:
+                pass  # Graceful degradation
     except Exception as e:
         yield sse_error(f"Failed to save version: {e}")
         yield sse_done()

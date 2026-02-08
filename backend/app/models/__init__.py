@@ -3,5 +3,6 @@ from app.models.project_version import ProjectVersion
 from app.models.project_file import ProjectFile
 from app.models.chat_thread import ChatThread
 from app.models.chat_message import ChatMessage
+from app.models.project_memory import ProjectMemory
 
-__all__ = ["Project", "ProjectVersion", "ProjectFile", "ChatThread", "ChatMessage"]
+__all__ = ["Project", "ProjectVersion", "ProjectFile", "ChatThread", "ChatMessage", "ProjectMemory"]

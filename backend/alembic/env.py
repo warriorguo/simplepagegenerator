@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from app.config import settings
 from app.db.base import Base
 # Import all models so they register with Base.metadata
-from app.models import project, project_version, project_file, chat_thread, chat_message  # noqa: F401
+from app.models import project, project_version, project_file, chat_thread, chat_message, project_memory  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:
@@ -26,7 +26,7 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-OUR_TABLES = {"projects", "project_versions", "project_files", "chat_threads", "chat_messages"}
+OUR_TABLES = {"projects", "project_versions", "project_files", "chat_threads", "chat_messages", "project_memories"}
 
 
 def include_object(object, name, type_, reflected, compare_to):

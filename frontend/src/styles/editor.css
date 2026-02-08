@@ -192,3 +192,129 @@
 .version-item:hover .version-rollback {
   opacity: 1;
 }
+
+/* Memory panel */
+.memory-panel h3 {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.memory-add {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.memory-input {
+  width: 100%;
+  resize: vertical;
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: inherit;
+}
+
+.memory-add-btn {
+  align-self: flex-end;
+  font-size: 11px;
+  padding: 3px 12px;
+}
+
+.memory-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 8px 0;
+}
+
+.memory-item {
+  padding: 8px;
+  border-radius: var(--radius);
+  margin-bottom: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+
+.memory-item:hover {
+  border-color: var(--accent);
+}
+
+.memory-content {
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memory-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 10px;
+}
+
+.memory-source {
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.memory-source.auto {
+  color: var(--accent);
+}
+
+.memory-source.manual {
+  color: var(--success);
+}
+
+.memory-date {
+  color: var(--text-muted);
+  flex: 1;
+}
+
+.memory-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.memory-item:hover .memory-actions {
+  opacity: 1;
+}
+
+.memory-actions button {
+  font-size: 10px;
+  padding: 1px 6px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+}
+
+.memory-actions button:hover {
+  color: var(--accent);
+}
+
+.memory-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.memory-edit-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.memory-edit-actions button {
+  font-size: 10px;
+  padding: 2px 8px;
+}

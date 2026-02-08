@@ -19,15 +19,17 @@ You have access to these tools:
 After completing all file operations, provide a brief summary of what you built."""
 
 
-def build_builder_prompt(plan_json: str, current_files: list[dict]) -> str:
+def build_builder_prompt(plan_json: str, current_files: list[dict], memories_context: str = "") -> str:
     files_content = ""
     for f in current_files:
         files_content += f"\n--- {f['file_path']} ---\n{f['content']}\n"
+
+    memory_section = f"\n\n{memories_context}\n" if memories_context else ""
 
     return f"""File plan to execute:
 {plan_json}
 
 Current file contents:
 {files_content}
-
+{memory_section}
 Execute the plan by calling write_file for each file that needs to be created or modified, and delete_file for any files to remove. Write COMPLETE file contents."""

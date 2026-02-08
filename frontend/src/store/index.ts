@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { Project } from '../types/project'
 import type { ChatMessage } from '../types/chat'
 import type { ProjectVersion } from '../types/version'
+import type { Memory } from '../types/memory'
 
 interface StreamingMessage {
   tokens: string
@@ -33,6 +34,10 @@ interface AppState {
   // Versions
   versions: ProjectVersion[]
   setVersions: (v: ProjectVersion[]) => void
+
+  // Memories
+  memories: Memory[]
+  setMemories: (m: Memory[]) => void
 
   // Preview
   previewKey: number
@@ -76,6 +81,9 @@ export const useStore = create<AppState>((set) => ({
 
   versions: [],
   setVersions: (v) => set({ versions: v }),
+
+  memories: [],
+  setMemories: (m) => set({ memories: m }),
 
   previewKey: 0,
   refreshPreview: () => set((s) => ({ previewKey: s.previewKey + 1 })),

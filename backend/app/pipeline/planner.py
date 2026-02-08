@@ -11,8 +11,9 @@ async def create_plan(
     client: AsyncOpenAI,
     intent_json: str,
     current_files: list[dict],
+    memories_context: str = "",
 ) -> PlanResult:
-    prompt = build_planner_prompt(intent_json, current_files)
+    prompt = build_planner_prompt(intent_json, current_files, memories_context)
 
     response = await client.chat.completions.create(
         model=settings.openai_model,

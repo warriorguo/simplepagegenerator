@@ -19,13 +19,14 @@ Example:
 """
 
 
-def build_planner_prompt(intent_json: str, current_files: list[dict]) -> str:
+def build_planner_prompt(intent_json: str, current_files: list[dict], memories_context: str = "") -> str:
     files_summary = "\n".join(
         f"- {f['file_path']} ({len(f['content'])} chars)" for f in current_files
     )
+    memory_section = f"\n\n{memories_context}\n" if memories_context else ""
     return f"""Current project files:
 {files_summary}
-
+{memory_section}
 User intent:
 {intent_json}
 

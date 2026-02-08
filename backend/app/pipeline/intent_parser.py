@@ -7,12 +7,16 @@ from app.pipeline.prompts.intent_parser import INTENT_PARSER_SYSTEM
 from app.schemas.pipeline import IntentResult
 
 
-async def parse_intent(client: AsyncOpenAI, message: str, history: list[dict]) -> IntentResult:
+async def parse_intent(client: AsyncOpenAI, message: str, history: list[dict], memories_context: str = "") -> IntentResult:
     messages = [
         {"role": "system", "content": INTENT_PARSER_SYSTEM},
+    ]
+    if memories_context:
+        messages.append({"role": "system", "content": memories_context})
+    messages.extend([
         *history[-10:],  # Last 10 messages for context
         {"role": "user", "content": message},
-    ]
+    ])
 
     response = await client.chat.completions.create(
         model=settings.openai_model,

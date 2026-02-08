@@ -13,9 +13,10 @@ async def execute_build(
     client: AsyncOpenAI,
     plan_json: str,
     current_files: list[dict],
+    memories_context: str = "",
 ) -> AsyncGenerator[str | dict, None]:
     """Execute the build plan. Yields SSE events and file operations as dicts."""
-    prompt = build_builder_prompt(plan_json, current_files)
+    prompt = build_builder_prompt(plan_json, current_files, memories_context)
 
     messages = [
         {"role": "system", "content": BUILDER_SYSTEM},

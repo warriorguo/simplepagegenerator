@@ -13,9 +13,10 @@ async def fix_errors(
     client: AsyncOpenAI,
     errors: list[str],
     current_files: list[dict],
+    memories_context: str = "",
 ) -> AsyncGenerator[str | dict, None]:
     """Attempt to fix build errors. Yields SSE events and file operations."""
-    prompt = build_fix_prompt(errors, current_files)
+    prompt = build_fix_prompt(errors, current_files, memories_context)
 
     messages = [
         {"role": "system", "content": FIX_AGENT_SYSTEM},

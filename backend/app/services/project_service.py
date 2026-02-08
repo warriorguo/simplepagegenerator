@@ -8,6 +8,7 @@ from app.models.project_version import ProjectVersion
 from app.models.project_file import ProjectFile
 from app.models.chat_thread import ChatThread
 from app.models.chat_message import ChatMessage
+from app.models.project_memory import ProjectMemory
 from app.schemas.project import ProjectCreate, ProjectUpdate
 from app.templates.init_project import DEFAULT_FILES
 
@@ -87,6 +88,8 @@ async def delete_project(db: AsyncSession, project_id: uuid.UUID) -> bool:
     await db.execute(delete(ChatMessage).where(ChatMessage.thread_id.in_(thread_ids)))
     # 6. Delete chat threads
     await db.execute(delete(ChatThread).where(ChatThread.project_id == project_id))
+    # 6.5. Delete project memories
+    await db.execute(delete(ProjectMemory).where(ProjectMemory.project_id == project_id))
     # 7. Delete project
     await db.execute(delete(Project).where(Project.id == project_id))
     await db.commit()
