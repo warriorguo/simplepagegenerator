@@ -3,6 +3,7 @@ import type { Project } from '../types/project'
 import type { ChatMessage } from '../types/chat'
 import type { ProjectVersion } from '../types/version'
 import type { Memory } from '../types/memory'
+import type { ExplorationOption, ExplorationState, HypothesisLedger, Ambiguity, MemoryInfluence, MemoryNote } from '../types/exploration'
 
 interface StreamingMessage {
   tokens: string
@@ -46,6 +47,33 @@ interface AppState {
   // Sending state
   isSending: boolean
   setIsSending: (v: boolean) => void
+
+  // Exploration
+  explorationState: ExplorationState
+  setExplorationState: (s: ExplorationState) => void
+  sessionId: number | null
+  setSessionId: (id: number | null) => void
+  explorationOptions: ExplorationOption[]
+  setExplorationOptions: (opts: ExplorationOption[]) => void
+  selectedOptionId: string | null
+  setSelectedOptionId: (id: string | null) => void
+  previewingTemplateId: string | null
+  setPreviewingTemplateId: (id: string | null) => void
+  hypothesisLedger: HypothesisLedger | null
+  setHypothesisLedger: (h: HypothesisLedger | null) => void
+  iterationCount: number
+  setIterationCount: (n: number) => void
+  memoryNotes: MemoryNote[]
+  setMemoryNotes: (notes: MemoryNote[]) => void
+  ambiguity: Ambiguity | null
+  setAmbiguity: (a: Ambiguity | null) => void
+  memoryInfluence: MemoryInfluence | null
+  setMemoryInfluence: (m: MemoryInfluence | null) => void
+  isExploring: boolean
+  setIsExploring: (v: boolean) => void
+  activeTab: 'explore' | 'iterate' | 'memory'
+  setActiveTab: (tab: 'explore' | 'iterate' | 'memory') => void
+  resetExploration: () => void
 }
 
 const initialStreaming: StreamingMessage = {
@@ -90,4 +118,44 @@ export const useStore = create<AppState>((set) => ({
 
   isSending: false,
   setIsSending: (v) => set({ isSending: v }),
+
+  // Exploration
+  explorationState: 'idle',
+  setExplorationState: (s) => set({ explorationState: s }),
+  sessionId: null,
+  setSessionId: (id) => set({ sessionId: id }),
+  explorationOptions: [],
+  setExplorationOptions: (opts) => set({ explorationOptions: opts }),
+  selectedOptionId: null,
+  setSelectedOptionId: (id) => set({ selectedOptionId: id }),
+  previewingTemplateId: null,
+  setPreviewingTemplateId: (id) => set({ previewingTemplateId: id }),
+  hypothesisLedger: null,
+  setHypothesisLedger: (h) => set({ hypothesisLedger: h }),
+  iterationCount: 0,
+  setIterationCount: (n) => set({ iterationCount: n }),
+  memoryNotes: [],
+  setMemoryNotes: (notes) => set({ memoryNotes: notes }),
+  ambiguity: null,
+  setAmbiguity: (a) => set({ ambiguity: a }),
+  memoryInfluence: null,
+  setMemoryInfluence: (m) => set({ memoryInfluence: m }),
+  isExploring: false,
+  setIsExploring: (v) => set({ isExploring: v }),
+  activeTab: 'explore',
+  setActiveTab: (tab) => set({ activeTab: tab }),
+  resetExploration: () =>
+    set({
+      explorationState: 'idle',
+      sessionId: null,
+      explorationOptions: [],
+      selectedOptionId: null,
+      previewingTemplateId: null,
+      hypothesisLedger: null,
+      iterationCount: 0,
+      ambiguity: null,
+      memoryInfluence: null,
+      isExploring: false,
+      activeTab: 'explore',
+    }),
 }))
