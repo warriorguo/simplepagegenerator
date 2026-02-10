@@ -5,6 +5,7 @@ import PreviewPanel from '../components/preview/PreviewPanel'
 import ExplorePanel from '../components/exploration/ExplorePanel'
 import IteratePanel from '../components/exploration/IteratePanel'
 import ExplorationMemoryPanel from '../components/exploration/ExplorationMemoryPanel'
+import DebugPanel from '../components/exploration/DebugPanel'
 import VersionList from '../components/version/VersionList'
 import MemoryPanel from '../components/memory/MemoryPanel'
 import { useProject } from '../hooks/useProject'
@@ -120,11 +121,18 @@ export default function EditorPage() {
               >
                 Memory
               </button>
+              <button
+                className={`tab-btn tab-btn-debug ${activeTab === 'debug' ? 'active' : ''}`}
+                onClick={() => setActiveTab('debug')}
+              >
+                Debug
+              </button>
             </div>
             <div className="tab-content">
               {activeTab === 'explore' && <ExplorePanel projectId={id} />}
               {activeTab === 'iterate' && <IteratePanel projectId={id} />}
               {activeTab === 'memory' && <ExplorationMemoryPanel projectId={id} />}
+              {activeTab === 'debug' && <DebugPanel />}
             </div>
           </div>
         </div>

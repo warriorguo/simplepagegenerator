@@ -1,5 +1,7 @@
 import json
+import time
 import uuid
+from collections import deque
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -7,6 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+
+# ─── Debug Log ─────────────────────────────────────────────
+# In-memory ring buffer of recent OpenAI calls (max 50)
+_debug_log: deque[dict] = deque(maxlen=50)
 from app.models.exploration import (
     ExplorationSession, ExplorationOption, ExplorationMemoryNote, UserPreference
 )
@@ -17,58 +23,189 @@ from app.models.project_file import ProjectFile
 
 # ─── Prompts ────────────────────────────────────────────────
 
-AMBIGUITY_DECOMPOSE_PROMPT = """You are a game design ambiguity analyzer. Given a user's vague game idea description, decompose it into structured ambiguity dimensions.
+# Stage A: Requirement Decomposer — user request → implementation dimensions
+STAGE_A_DECOMPOSER_PROMPT = """You are an implementation-oriented requirement decomposer for Phaser web games.
 
-Output a JSON object with these keys:
-{
-  "gameplay_type": {"candidates": ["platformer","shooter","puzzle","runner","clicker","tower_defense","other"], "detected": ["..."]},
-  "control_method": {"candidates": ["keyboard","touch_tap","touch_swipe","mouse_click","auto"], "detected": ["..."]},
-  "pace": {"candidates": ["fast","medium","slow","idle"], "detected": ["..."]},
-  "goal_structure": {"candidates": ["high_score","level_clear","endless","economy","survival"], "detected": ["..."]},
-  "difficulty": {"candidates": ["easy","medium","hard","progressive"], "detected": ["..."]},
-  "visual_complexity": {"candidates": ["minimal","moderate","rich"], "detected": ["..."]},
-  "platform": {"candidates": ["mobile","desktop","both"], "detected": ["..."]}
-}
+Given the user's request, decompose it into implementation dimensions.
+Do NOT propose solutions yet.
 
-For each dimension, "detected" should list the most likely values based on the input.
-If ambiguous, list multiple candidates in "detected".
-Always return valid JSON only, no markdown."""
+Output JSON only:
+
+{{
+  "summary": "one-sentence restatement of what the user wants",
+  "dimensions": {{
+    "controls": {{
+      "candidates": ["keyboard", "mouse_click", "touch_tap", "touch_drag", "virtual_joystick", "auto", "single_key"],
+      "confidence": "high|med|low",
+      "signals": ["quotes or inferences from user text"]
+    }},
+    "presentation": {{
+      "candidates": ["2d_topdown", "side_scroller", "isometric", "minimal_2d"],
+      "confidence": "high|med|low",
+      "signals": [...]
+    }},
+    "core_loop": {{
+      "candidates": ["move_dodge_shoot", "jump_collect", "match_clear", "click_upgrade", "build_defend", "run_avoid"],
+      "confidence": "high|med|low",
+      "signals": [...]
+    }},
+    "goals": {{
+      "candidates": ["high_score", "level_clear", "endless_survival", "economy_growth", "time_attack"],
+      "confidence": "high|med|low",
+      "signals": [...]
+    }},
+    "progression": {{
+      "candidates": ["infinite", "levels", "missions", "freeform"],
+      "confidence": "high|med|low",
+      "signals": [...]
+    }},
+    "systems": {{
+      "candidates": ["physics", "collision", "simple_ai", "projectiles", "grid", "economy", "spawner"],
+      "confidence": "high|med|low",
+      "signals": [...]
+    }},
+    "platform": {{
+      "candidates": ["mobile", "desktop", "both"],
+      "confidence": "high|med|low",
+      "signals": [...]
+    }},
+    "tone": {{
+      "candidates": ["exciting", "relaxing", "tense", "cute", "retro", "minimal"],
+      "confidence": "high|med|low",
+      "signals": [...]
+    }}
+  }},
+  "hard_constraints": ["things the user explicitly required or excluded"],
+  "open_questions": [
+    {{"dimension": "...", "question": "...", "why_it_matters": "..."}}
+  ]
+}}
+
+Rules:
+- Each dimension must have 1-4 candidates. More candidates = more ambiguity.
+- Infer from text; if info is missing, mark confidence "low".
+- "signals" are direct quotes or logical inferences.
+- Return valid JSON only, no markdown."""
 
 
-OPTION_GENERATE_PROMPT = """You are a Phaser game option generator. Based on the ambiguity analysis and available templates, generate 3-6 differentiated game options.
+# Stage B: Branch Synthesizer — dimensions → 3-6 divergent branches
+STAGE_B_BRANCH_PROMPT = """You are a branch synthesizer for Phaser web game prototyping.
 
-Available template IDs: {template_ids}
+Given decomposed implementation dimensions, generate 3-6 divergent design branches.
+Each branch is one internally-consistent set of choices across all dimensions.
 
 Memory context (user preferences from past explorations):
 {memory_context}
 
-Ambiguity analysis:
-{ambiguity_json}
+Dimensions JSON:
+{dimensions_json}
 
-User input: "{user_input}"
-
-Generate options as a JSON array. Each option must be:
+Output JSON only:
 {{
-  "option_id": "opt_<number>",
-  "title": "...",
-  "core_loop": "...",
-  "controls": "...",
-  "mechanics": ["..."],
-  "engine": "Phaser",
-  "template_id": "<one of the available template IDs>",
-  "complexity": "low|medium|high",
-  "mobile_fit": "good|fair|poor",
-  "assumptions_to_validate": ["..."],
-  "is_recommended": true/false
+  "branches": [
+    {{
+      "branch_id": "B1",
+      "name": "short catchy name",
+      "picked": {{
+        "controls": "chosen value",
+        "presentation": "chosen value",
+        "core_loop": "one-sentence description of the 5-30s loop",
+        "goals": "chosen value",
+        "progression": "chosen value",
+        "systems": ["list of systems needed"],
+        "platform": "chosen value",
+        "tone": "chosen value"
+      }},
+      "why_this_branch": ["reasons this combination is interesting"],
+      "risks": ["what might not work"],
+      "what_to_validate": ["key assumptions to test"]
+    }}
+  ]
 }}
 
 Rules:
-- Options must differ significantly (different gameplay or input method)
-- Not just parameter tweaks
-- Exactly one should be marked is_recommended=true
-- If memory shows preferences, bias recommendations toward them
-- 3-6 options total
-- Return valid JSON array only, no markdown."""
+- Branches MUST differ on at least 2 major dimensions (controls / presentation / core_loop).
+- Keep scope MVP-friendly: each branch should be prototypable with Phaser primitives, no external assets.
+- If user implies true 3D, propose isometric/pseudo-3D alternatives.
+- If memory context shows user preferences, make one branch aligned with those preferences.
+- 3-6 branches total.
+- Return valid JSON only, no markdown."""
+
+
+# Stage C: Demo Mapper — branches → option cards with template_id
+STAGE_C_MAPPER_PROMPT = """You are a demo mapper for Phaser web game prototyping.
+
+Map each design branch to one runnable demo template from the catalog.
+Choose the closest template; note small tweaks needed after selection.
+
+Available templates (template_id → description):
+{template_catalog}
+
+Branches JSON:
+{branches_json}
+
+Output JSON only:
+{{
+  "options": [
+    {{
+      "option_id": "opt_1",
+      "branch_id": "B1",
+      "title": "display name",
+      "core_loop": "what the player does every 5-30 seconds",
+      "controls": "input method description",
+      "mechanics": ["mechanic_1", "mechanic_2"],
+      "engine": "Phaser",
+      "template_id": "one of the available template IDs",
+      "complexity": "low|medium|high",
+      "mobile_fit": "good|fair|poor",
+      "assumptions_to_validate": ["key hypotheses"],
+      "is_recommended": false
+    }}
+  ],
+  "recommended_option_id": "opt_?"
+}}
+
+Rules:
+- 3-6 options, one per branch.
+- Exactly one recommended option (set is_recommended=true on it AND fill recommended_option_id).
+- Options must be runnable immediately from the template with zero to minimal tweaks.
+- Prefer low/medium complexity templates during exploration.
+- Return valid JSON only, no markdown."""
+
+
+# Stage D: Code Customizer — template + option spec → customized game code
+STAGE_D_CUSTOMIZER_PROMPT = """You are a Phaser 3 game code customizer.
+
+You will receive:
+1. A base template (complete HTML+JS Phaser game)
+2. A game design spec describing the target game
+
+Your job: rewrite the template code so it becomes the described game.
+Keep the same Phaser boilerplate structure (CDN import, config, scene lifecycle).
+Change the gameplay, controls, mechanics, visuals, text, and behavior to match the spec.
+
+Game design spec:
+- Title: {title}
+- Core loop: {core_loop}
+- Controls: {controls}
+- Mechanics: {mechanics}
+- Complexity: {complexity}
+- Mobile fit: {mobile_fit}
+
+User's original request: "{user_input}"
+
+Base template code:
+{template_code}
+
+Rules:
+- Output a JSON object mapping file_path to full file content: {{"index.html": "<!DOCTYPE html>..."}}
+- The game MUST be fully playable with zero external assets (use Phaser primitives: rectangles, circles, text, graphics).
+- Keep the CDN import: https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js
+- Maintain mobile support (touch controls, Scale.FIT).
+- Write complete, working code — do NOT leave placeholders or TODOs.
+- Match the core_loop and controls description as closely as possible.
+- Keep it simple but fun — this is a prototype.
+- Return valid JSON only, no markdown."""
 
 
 MEMORY_WRITER_PROMPT = """You are a structured memory writer for game exploration sessions.
@@ -130,25 +267,66 @@ Return valid JSON only, no markdown."""
 
 # ─── Helpers ────────────────────────────────────────────────
 
-async def _call_openai_json(client: AsyncOpenAI, system: str, user: str) -> Any:
-    """Call OpenAI and parse JSON response."""
-    response = await client.chat.completions.create(
-        model=settings.openai_model,
-        messages=[
+async def _call_openai_json(
+    client: AsyncOpenAI, system: str, user: str, label: str = "", max_tokens: int = 4000
+) -> Any:
+    """Call OpenAI and parse JSON response. Logs to debug buffer."""
+    t0 = time.time()
+    entry: dict = {
+        "label": label,
+        "timestamp": t0,
+        "model": settings.openai_model,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.7,
-        max_tokens=4000,
-    )
-    content = response.choices[0].message.content or "{}"
-    content = content.strip()
-    if content.startswith("```"):
-        content = content.split("\n", 1)[1] if "\n" in content else content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
+        "raw_response": None,
+        "parsed": None,
+        "error": None,
+        "duration_ms": 0,
+    }
+    try:
+        response = await client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.7,
+            max_tokens=max_tokens,
+        )
+        content = response.choices[0].message.content or "{}"
+        entry["raw_response"] = content
+        entry["usage"] = {
+            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+            "total_tokens": response.usage.total_tokens if response.usage else 0,
+        }
         content = content.strip()
-    return json.loads(content)
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+        parsed = json.loads(content)
+        entry["parsed"] = parsed
+        return parsed
+    except Exception as e:
+        entry["error"] = str(e)
+        raise
+    finally:
+        entry["duration_ms"] = round((time.time() - t0) * 1000)
+        _debug_log.append(entry)
+
+
+def get_debug_log() -> list[dict]:
+    """Return all debug log entries."""
+    return list(_debug_log)
+
+
+def clear_debug_log() -> None:
+    """Clear the debug log."""
+    _debug_log.clear()
 
 
 # ─── Memory Retrieval ───────────────────────────────────────
@@ -193,40 +371,109 @@ async def get_memory_context(
     return context
 
 
-# ─── Ambiguity Decomposer ──────────────────────────────────
+# ─── Stage A: Requirement Decomposer ──────────────────────
 
-async def decompose_ambiguity(
+async def decompose_requirements(
     client: AsyncOpenAI, user_input: str
 ) -> dict:
-    """Decompose user input into ambiguity dimensions."""
+    """Stage A: Decompose user input into implementation dimensions."""
     return await _call_openai_json(
-        client, AMBIGUITY_DECOMPOSE_PROMPT, user_input
+        client, STAGE_A_DECOMPOSER_PROMPT, user_input, label="A:decompose"
     )
 
 
-# ─── Option Generator ──────────────────────────────────────
+# ─── Stage B: Branch Synthesizer ──────────────────────────
 
-async def generate_options(
+async def synthesize_branches(
     client: AsyncOpenAI,
-    user_input: str,
-    ambiguity_json: dict,
+    dimensions_json: dict,
     memory_context: dict,
-    template_ids: list[str],
 ) -> list[dict]:
-    """Generate 3-6 differentiated Phaser game options."""
-    prompt = OPTION_GENERATE_PROMPT.format(
-        template_ids=json.dumps(template_ids),
+    """Stage B: Combine dimensions into 3-6 divergent branches."""
+    prompt = STAGE_B_BRANCH_PROMPT.format(
         memory_context=json.dumps(memory_context, indent=2),
-        ambiguity_json=json.dumps(ambiguity_json, indent=2),
-        user_input=user_input,
+        dimensions_json=json.dumps(dimensions_json, indent=2),
     )
-    result = await _call_openai_json(client, prompt, user_input)
+    result = await _call_openai_json(client, prompt, "Synthesize branches", label="B:branches")
+    if isinstance(result, dict) and "branches" in result:
+        return result["branches"]
     if isinstance(result, list):
         return result
     return []
 
 
-# ─── Explore ───────────────────────────────────────────────
+# ─── Stage C: Demo Mapper ────────────────────────────────
+
+async def map_demos(
+    client: AsyncOpenAI,
+    branches: list[dict],
+    template_catalog: list[dict],
+) -> tuple[list[dict], str | None]:
+    """Stage C: Map branches to template options. Returns (options, recommended_id)."""
+    catalog_summary = [
+        {
+            "template_id": t["template_id"],
+            "title": t["title"],
+            "core_loop": t["core_loop"],
+            "controls": t["controls"],
+            "mechanics": t["mechanics"],
+            "complexity": t["complexity"],
+            "mobile_fit": t["mobile_fit"],
+        }
+        for t in template_catalog
+    ]
+    prompt = STAGE_C_MAPPER_PROMPT.format(
+        template_catalog=json.dumps(catalog_summary, indent=2),
+        branches_json=json.dumps(branches, indent=2),
+    )
+    result = await _call_openai_json(client, prompt, "Map branches to demos", label="C:mapper")
+    options = []
+    recommended_id = None
+    if isinstance(result, dict):
+        options = result.get("options", [])
+        recommended_id = result.get("recommended_option_id")
+    elif isinstance(result, list):
+        options = result
+    # Mark the recommended option
+    if recommended_id:
+        for opt in options:
+            opt["is_recommended"] = (opt.get("option_id") == recommended_id)
+    return options, recommended_id
+
+
+# ─── Stage D: Code Customizer ────────────────────────────
+
+async def customize_template(
+    client: AsyncOpenAI,
+    template_files: list[dict],
+    option: dict,
+    user_input: str,
+) -> dict[str, str]:
+    """Stage D: Customize template code to match the selected option's game design."""
+    # Build template code context
+    template_code = ""
+    for f in template_files:
+        template_code += f"--- {f['file_path']} ---\n{f['content']}\n\n"
+
+    prompt = STAGE_D_CUSTOMIZER_PROMPT.format(
+        title=option.get("title", ""),
+        core_loop=option.get("core_loop", ""),
+        controls=option.get("controls", ""),
+        mechanics=json.dumps(option.get("mechanics", [])),
+        complexity=option.get("complexity", "medium"),
+        mobile_fit=option.get("mobile_fit", "good"),
+        user_input=user_input,
+        template_code=template_code,
+    )
+    result = await _call_openai_json(
+        client, prompt, "Customize game code", label="D:customize", max_tokens=8000
+    )
+    if isinstance(result, dict):
+        return result
+    return {}
+
+
+# ─── Explore (full pipeline A → B → C) ───────────────────
 
 async def explore(
     db: AsyncSession,
@@ -234,18 +481,29 @@ async def explore(
     project_id: uuid.UUID,
     user_input: str,
     template_ids: list[str],
+    template_catalog: list[dict] | None = None,
 ) -> dict:
-    """Full explore flow: decompose -> memory -> generate options -> persist."""
-    ambiguity = await decompose_ambiguity(client, user_input)
-    memory_ctx = await get_memory_context(db, project_id)
-    options = await generate_options(
-        client, user_input, ambiguity, memory_ctx, template_ids
-    )
+    """Full explore pipeline: A:decompose → B:branches → C:mapper → persist."""
+    # Stage A
+    decomposition = await decompose_requirements(client, user_input)
 
+    # Memory retrieval
+    memory_ctx = await get_memory_context(db, project_id)
+
+    # Stage B
+    branches = await synthesize_branches(client, decomposition, memory_ctx)
+
+    # Stage C
+    if template_catalog is None:
+        from app.templates.phaser_demos import PHASER_DEMO_CATALOG
+        template_catalog = PHASER_DEMO_CATALOG
+    options, recommended_id = await map_demos(client, branches, template_catalog)
+
+    # Persist
     session = ExplorationSession(
         project_id=project_id,
         user_input=user_input,
-        ambiguity_json=ambiguity,
+        ambiguity_json=decomposition,
         state="explore_options",
     )
     db.add(session)
@@ -274,7 +532,8 @@ async def explore(
 
     return {
         "session_id": session.id,
-        "ambiguity": ambiguity,
+        "ambiguity": decomposition,
+        "branches": branches,
         "options": option_responses,
         "memory_influence": memory_ctx if memory_ctx["relevant_preferences"] else None,
     }
@@ -284,18 +543,43 @@ async def explore(
 
 async def select_option(
     db: AsyncSession,
+    client: AsyncOpenAI,
     project_id: uuid.UUID,
     session_id: int,
     option_id: str,
     template_files: list[dict],
 ) -> dict:
-    """Select an option: import template files, create version, transition state."""
+    """Select an option: customize template with AI, create version, transition state."""
     result = await db.execute(
         select(ExplorationSession).where(ExplorationSession.id == session_id)
     )
     session = result.scalar_one_or_none()
     if not session:
         raise ValueError("Session not found")
+
+    # Get the option details for customization context
+    opt_result = await db.execute(
+        select(ExplorationOption).where(
+            ExplorationOption.session_id == session_id,
+            ExplorationOption.option_id == option_id,
+        )
+    )
+    option_row = opt_result.scalar_one_or_none()
+    option_spec = {}
+    if option_row:
+        option_spec = {
+            "title": option_row.title,
+            "core_loop": option_row.core_loop,
+            "controls": option_row.controls,
+            "mechanics": option_row.mechanics,
+            "complexity": option_row.complexity,
+            "mobile_fit": option_row.mobile_fit,
+        }
+
+    # Stage D: AI-customize the template code based on the option
+    customized = await customize_template(
+        client, template_files, option_spec, session.user_input
+    )
 
     version = ProjectVersion(
         project_id=project_id,
@@ -304,11 +588,14 @@ async def select_option(
     db.add(version)
     await db.flush()
 
+    # Use customized code if available, fallback to raw template
     for f in template_files:
+        fp = f["file_path"]
+        content = customized.get(fp, f["content"])
         pf = ProjectFile(
             version_id=version.id,
-            file_path=f["file_path"],
-            content=f["content"],
+            file_path=fp,
+            content=content,
             file_type=f.get("file_type", "text/html"),
         )
         db.add(pf)
@@ -375,7 +662,7 @@ async def iterate(
         ),
         user_input=user_input,
     )
-    modifications = await _call_openai_json(client, prompt, user_input)
+    modifications = await _call_openai_json(client, prompt, user_input, label="iterate", max_tokens=8000)
 
     new_version = ProjectVersion(
         project_id=project_id,
@@ -458,7 +745,7 @@ async def finish_exploration(
         hypothesis_ledger=json.dumps(session.hypothesis_ledger),
         ambiguity_json=json.dumps(session.ambiguity_json),
     )
-    memory_content = await _call_openai_json(client, prompt, "Generate structured memory")
+    memory_content = await _call_openai_json(client, prompt, "Generate structured memory", label="finish_exploration")
 
     memory_content["refs"] = {
         "exploration_session_id": session.id,

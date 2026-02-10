@@ -123,21 +123,26 @@ export default function IteratePanel({ projectId }: Props) {
       <div className="iterate-input-area">
         <textarea
           className="iterate-input"
-          placeholder="Describe what to change... (e.g., make the player faster, add enemies)"
+          placeholder="Describe what to change, e.g. make the player faster, add enemies..."
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          rows={2}
+          rows={3}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleIterate()
           }}
         />
-        <button
-          className="btn-primary iterate-btn"
-          onClick={handleIterate}
-          disabled={loading || !input.trim()}
-        >
-          {loading ? 'Applying...' : 'Apply Change'}
-        </button>
+        <div className="iterate-input-footer">
+          <span className="iterate-input-hint">
+            {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Enter
+          </span>
+          <button
+            className="btn-primary iterate-btn"
+            onClick={handleIterate}
+            disabled={loading || !input.trim()}
+          >
+            {loading ? 'Applying...' : 'Apply Change'}
+          </button>
+        </div>
       </div>
     </div>
   )

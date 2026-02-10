@@ -71,8 +71,8 @@ interface AppState {
   setMemoryInfluence: (m: MemoryInfluence | null) => void
   isExploring: boolean
   setIsExploring: (v: boolean) => void
-  activeTab: 'explore' | 'iterate' | 'memory'
-  setActiveTab: (tab: 'explore' | 'iterate' | 'memory') => void
+  activeTab: 'explore' | 'iterate' | 'memory' | 'debug'
+  setActiveTab: (tab: 'explore' | 'iterate' | 'memory' | 'debug') => void
   resetExploration: () => void
 }
 

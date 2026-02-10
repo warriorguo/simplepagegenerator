@@ -23,6 +23,7 @@ app.include_router(preview.router)
 app.include_router(publish.router)
 app.include_router(memories.router)
 app.include_router(exploration.router)
+app.include_router(exploration.debug_router)
 
 
 @app.get("/health")

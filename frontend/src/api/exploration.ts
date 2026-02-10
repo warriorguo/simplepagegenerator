@@ -47,3 +47,11 @@ export function listMemoryNotes(projectId: string) {
 export function getTemplatePreviewUrl(projectId: string, templateId: string) {
   return `/api/v1/projects/${projectId}/exploration/preview/${templateId}`
 }
+
+export function fetchDebugLog() {
+  return apiFetch<any[]>('/debug/openai_log')
+}
+
+export function clearDebugLog() {
+  return apiFetch<{ status: string }>('/debug/openai_log', { method: 'DELETE' })
+}

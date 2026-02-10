@@ -6,13 +6,13 @@
 
 - [Overview](#overview)
 - [Architecture](#architecture)
+- [AI Pipeline (4 Stages)](#ai-pipeline-4-stages)
 - [State Machine](#state-machine)
 - [Core Flow](#core-flow)
 - [API Reference](#api-reference)
 - [Database Schema](#database-schema)
 - [Frontend Components](#frontend-components)
 - [Template Catalog](#template-catalog)
-- [AI Prompts](#ai-prompts)
 - [Data Structures](#data-structures)
 - [Design Principles](#design-principles)
 
@@ -20,13 +20,14 @@
 
 ## Overview
 
-The Exploration System is the core interaction model for SimplePageGenerator's game prototyping workflow. Rather than asking users clarifying questions about their game idea, the system **decomposes ambiguity** and **generates 3-6 runnable Phaser 3 candidates** that users can preview, select, and iteratively refine. All conclusions are captured as **structured memory** that biases future explorations.
+The Exploration System is the core interaction model for SimplePageGenerator's game prototyping workflow. Rather than asking users clarifying questions about their game idea, the system **decomposes requirements into 8 implementation dimensions**, **synthesizes divergent design branches**, **maps branches to runnable Phaser 3 templates**, and **customizes the code with AI** to produce a playable prototype matching the user's intent. All conclusions are captured as **structured memory** that biases future explorations.
 
 ### Key Characteristics
 
 - **Option-First**: No clarifying questions. Ambiguity is decomposed internally and explored through concrete, playable options.
+- **4-Stage AI Pipeline**: Decompose → Branch → Map → Customize. Each stage has a dedicated prompt and debug logging.
+- **AI-Customized Code**: Selecting an option doesn't just copy a preset demo — the template is rewritten by AI to match the specific game design.
 - **Closed-Loop Memory**: Each exploration session produces structured conclusions that influence future sessions.
-- **Template-Based**: Options are mapped to pre-built Phaser 3 templates (fully self-contained HTML, no external assets).
 - **Versioned Iterations**: Every code modification creates an immutable `ProjectVersion` that can be rolled back.
 
 ---
@@ -40,9 +41,10 @@ The Exploration System is the core interaction model for SimplePageGenerator's g
 │  EditorPage                                          │
 │  ├── PreviewPanel / Template iframe                  │
 │  └── Tabs                                            │
-│      ├── ExplorePanel  → OptionCard[]                │
+│      ├── ExplorePanel  → Decomposition + OptionCard[]│
 │      ├── IteratePanel  → HypothesisLedger            │
-│      └── ExplorationMemoryPanel → MemoryNoteCard[]   │
+│      ├── ExplorationMemoryPanel → MemoryNoteCard[]   │
+│      └── DebugPanel    → OpenAI call log             │
 │                                                      │
 │  Zustand Store (exploration state slice)              │
 │  API Client (api/exploration.ts)                     │
@@ -60,13 +62,20 @@ The Exploration System is the core interaction model for SimplePageGenerator's g
 │  ├── GET  /exploration/memory_notes                  │
 │  └── GET  /exploration/preview/{template_id}         │
 │                                                      │
+│  Debug Router: /api/v1/debug/...                     │
+│  ├── GET  /openai_log                                │
+│  └── DELETE /openai_log                              │
+│                                                      │
 │  Service: exploration_service.py                     │
-│  ├── decompose_ambiguity()  ←── OpenAI GPT           │
-│  ├── generate_options()     ←── OpenAI GPT           │
-│  ├── iterate()              ←── OpenAI GPT           │
-│  └── finish_exploration()   ←── OpenAI GPT           │
+│  ├── Stage A: decompose_requirements()  ←── OpenAI   │
+│  ├── Stage B: synthesize_branches()     ←── OpenAI   │
+│  ├── Stage C: map_demos()               ←── OpenAI   │
+│  ├── Stage D: customize_template()      ←── OpenAI   │
+│  ├── iterate()                          ←── OpenAI   │
+│  └── finish_exploration()               ←── OpenAI   │
 │                                                      │
 │  Templates: phaser_demos.py (6 game templates)       │
+│  Debug: _debug_log (in-memory ring buffer, max 50)   │
 └────────────────┬────────────────────────────────────┘
                  │  SQLAlchemy async
 ┌────────────────▼────────────────────────────────────┐
@@ -86,8 +95,8 @@ backend/
 ├── app/
 │   ├── models/exploration.py          # ORM models (4 tables)
 │   ├── schemas/exploration.py         # Pydantic request/response schemas
-│   ├── services/exploration_service.py # Business logic + AI orchestration
-│   ├── routers/exploration.py         # FastAPI endpoints
+│   ├── services/exploration_service.py # 4-stage AI pipeline + business logic
+│   ├── routers/exploration.py         # FastAPI endpoints + debug router
 │   └── templates/phaser_demos.py      # 6 Phaser 3 game templates
 ├── alembic/versions/
 │   └── b2c3d4e5f6g7_add_exploration_tables.py
@@ -97,13 +106,138 @@ frontend/src/
 ├── api/exploration.ts                 # API client functions
 ├── store/index.ts                     # Zustand store (exploration slice)
 ├── components/exploration/
-│   ├── ExplorePanel.tsx               # Input + ambiguity + options grid
+│   ├── ExplorePanel.tsx               # Input + decomposition + options grid
 │   ├── OptionCard.tsx                 # Single option card
 │   ├── IteratePanel.tsx               # Iteration chat + hypothesis ledger
-│   └── ExplorationMemoryPanel.tsx     # Memory notes viewer
+│   ├── ExplorationMemoryPanel.tsx     # Memory notes viewer
+│   └── DebugPanel.tsx                 # OpenAI call debug viewer
 ├── pages/EditorPage.tsx               # Main page with tabs + preview
 └── styles/exploration.css             # All exploration styles
 ```
+
+---
+
+## AI Pipeline (4 Stages)
+
+The explore flow chains four AI stages, each with a dedicated system prompt. Every OpenAI call is logged to an in-memory ring buffer (`deque(maxlen=50)`) accessible via the Debug tab.
+
+```
+User Input
+    │
+    ▼
+┌───────────────────────────┐
+│ Stage A: Decomposer       │  decompose_requirements()
+│ User text → 8 dimensions  │  Label: "A:decompose"
+│ + hard constraints        │  max_tokens: 4000
+│ + open questions          │
+└─────────┬─────────────────┘
+          │ dimensions JSON
+          ▼
+┌───────────────────────────┐
+│ Stage B: Branch Synth     │  synthesize_branches()
+│ Dimensions + memory       │  Label: "B:branches"
+│ → 3-6 divergent branches  │  max_tokens: 4000
+└─────────┬─────────────────┘
+          │ branches JSON
+          ▼
+┌───────────────────────────┐
+│ Stage C: Demo Mapper      │  map_demos()
+│ Branches + template       │  Label: "C:mapper"
+│ catalog → option cards    │  max_tokens: 4000
+└─────────┬─────────────────┘
+          │ options JSON
+          ▼
+      (User selects)
+          │
+          ▼
+┌───────────────────────────┐
+│ Stage D: Code Customizer  │  customize_template()
+│ Template code + option    │  Label: "D:customize"
+│ spec → customized game    │  max_tokens: 8000
+└───────────────────────────┘
+```
+
+### Stage A: Requirement Decomposer
+
+**Prompt**: `STAGE_A_DECOMPOSER_PROMPT`
+**Input**: User's free-text game description
+**Output**: JSON with `summary`, `dimensions`, `hard_constraints`, `open_questions`
+
+Decomposes the user's request into **8 implementation dimensions**:
+
+| Dimension | Example Candidates | Purpose |
+|---|---|---|
+| `controls` | keyboard, mouse_click, touch_tap, touch_drag, virtual_joystick, auto, single_key | How the player interacts |
+| `presentation` | 2d_topdown, side_scroller, isometric, minimal_2d | Visual perspective |
+| `core_loop` | move_dodge_shoot, jump_collect, match_clear, click_upgrade, build_defend, run_avoid | The 5-30s repeating action |
+| `goals` | high_score, level_clear, endless_survival, economy_growth, time_attack | What the player aims for |
+| `progression` | infinite, levels, missions, freeform | How difficulty/content advances |
+| `systems` | physics, collision, simple_ai, projectiles, grid, economy, spawner | Required subsystems |
+| `platform` | mobile, desktop, both | Target device |
+| `tone` | exciting, relaxing, tense, cute, retro, minimal | Emotional feel |
+
+Each dimension contains:
+- **candidates**: 1-4 possible values (more = more ambiguity)
+- **confidence**: `high` | `med` | `low` — how certain the AI is based on user text
+- **signals**: Direct quotes or inferences from the user's text
+
+Also extracts:
+- **hard_constraints**: Things the user explicitly required or excluded
+- **open_questions**: Ambiguities worth investigating, with `dimension`, `question`, `why_it_matters`
+
+### Stage B: Branch Synthesizer
+
+**Prompt**: `STAGE_B_BRANCH_PROMPT`
+**Input**: Dimensions JSON + memory context (past preferences)
+**Output**: 3-6 divergent design branches
+
+Each branch is one **internally-consistent set of choices** across all 8 dimensions. Branches must differ on at least 2 major dimensions (controls / presentation / core_loop).
+
+If memory context shows user preferences, one branch is aligned with those preferences.
+
+Branch structure:
+```json
+{
+  "branch_id": "B1",
+  "name": "Neon Dash Runner",
+  "picked": {
+    "controls": "single_key",
+    "presentation": "side_scroller",
+    "core_loop": "tap to jump over obstacles, collect coins",
+    "goals": "high_score",
+    "progression": "infinite",
+    "systems": ["physics", "collision", "spawner"],
+    "platform": "mobile",
+    "tone": "exciting"
+  },
+  "why_this_branch": ["Simple controls maximize mobile accessibility"],
+  "risks": ["May feel repetitive without progression"],
+  "what_to_validate": ["Is endless mode engaging enough?"]
+}
+```
+
+### Stage C: Demo Mapper
+
+**Prompt**: `STAGE_C_MAPPER_PROMPT`
+**Input**: Branches JSON + full template catalog metadata (not just IDs — includes title, core_loop, controls, mechanics, complexity, mobile_fit)
+**Output**: 3-6 option cards, one per branch, each mapped to a template_id
+
+The mapper picks the closest template for each branch, noting what tweaks will be needed. Exactly one option is marked `is_recommended: true`.
+
+### Stage D: Code Customizer
+
+**Prompt**: `STAGE_D_CUSTOMIZER_PROMPT`
+**Input**: Template source code + option spec (title, core_loop, controls, mechanics, complexity, mobile_fit) + user's original request
+**Output**: JSON mapping file_path to customized file content
+
+This stage runs when the user **selects** an option. Instead of copying the template verbatim, the AI rewrites the game code to:
+- Match the described core loop and controls
+- Implement the specified mechanics
+- Update title, colors, and gameplay behavior
+- Maintain mobile support (touch controls, Scale.FIT)
+- Use only Phaser primitives (no external assets)
+
+Uses `max_tokens: 8000` to accommodate full game code output.
 
 ---
 
@@ -115,17 +249,17 @@ The exploration lifecycle follows a strict state machine:
                  ┌────────────────────────┐
                  │         idle           │  (initial state)
                  └───────────┬────────────┘
-                             │ POST /explore
+                             │ POST /explore (Stages A → B → C)
                  ┌───────────▼────────────┐
-                 │    explore_options      │  AI generates 3-6 options
+                 │    explore_options      │  3-6 options generated
                  └───────────┬────────────┘
                              │ user previews template
                  ┌───────────▼────────────┐
-                 │      previewing        │  iframe shows template
+                 │      previewing        │  iframe shows raw template
                  └───────────┬────────────┘
-                             │ POST /select_option
+                             │ POST /select_option (Stage D)
                  ┌───────────▼────────────┐
-                 │      committed         │  template imported as ProjectVersion
+                 │      committed         │  AI-customized code saved
                  └───────────┬────────────┘
                              │ POST /iterate (repeatable)
                  ┌───────────▼────────────┐
@@ -145,61 +279,68 @@ The exploration lifecycle follows a strict state machine:
 
 ### State Descriptions
 
-| State | Description | Allowed Actions |
-|---|---|---|
-| `idle` | No active exploration | Start new exploration |
-| `explore_options` | AI generated options, user is reviewing | Preview, Select |
-| `previewing` | User is viewing a template in iframe (frontend-only) | Select, Preview another |
-| `committed` | User selected an option, template imported | Iterate, Finish |
-| `iterating` | User is modifying the game through iterations | Iterate more, Finish |
-| `memory_writing` | AI is synthesizing session into memory (transient) | Wait |
-| `stable` | Exploration complete, memory saved | Start new exploration |
+| State | Description | AI Stage | Allowed Actions |
+|---|---|---|---|
+| `idle` | No active exploration | — | Start new exploration |
+| `explore_options` | Options generated, user reviewing | A+B+C ran | Preview, Select |
+| `previewing` | User viewing raw template in iframe (frontend-only) | — | Select, Preview another |
+| `committed` | User selected an option, AI-customized code saved | D ran | Iterate, Finish |
+| `iterating` | User modifying game through iterations | Iterate prompt | Iterate more, Finish |
+| `memory_writing` | AI synthesizing session into memory (transient) | Memory writer | Wait |
+| `stable` | Exploration complete, memory saved | — | Start new exploration |
 
 ---
 
 ## Core Flow
 
-### 1. Explore: Generate Options
+### 1. Explore: Decompose → Branch → Map
 
-User describes a game idea. The system:
-
-1. **Decomposes ambiguity** into 7 dimensions via GPT:
-   - `gameplay_type`, `control_method`, `pace`, `goal_structure`, `difficulty`, `visual_complexity`, `platform`
-2. **Retrieves memory context** from past explorations (last 5 notes + user preferences)
-3. **Generates 3-6 options** via GPT, each mapped to a Phaser template
-4. **Persists** session and options to database
+User describes a game idea. The system runs Stages A → B → C:
 
 ```
-User: "I want a fun mobile game"
+User: "I want a fast mobile game where you tap to jump over things"
                     │
-         ┌──────────▼──────────┐
-         │ Ambiguity Decompose │
-         │ gameplay: [runner,   │
-         │   clicker, puzzle]   │
-         │ pace: [fast, idle]   │
-         │ platform: [mobile]   │
-         └──────────┬──────────┘
+         ┌──────────▼───────────┐
+         │ Stage A: Decomposer  │
+         │ 8 dimensions:        │
+         │  controls: single_key│ (high, "tap to jump")
+         │  presentation: side  │ (med)
+         │  core_loop: run_avoid│ (high, "jump over things")
+         │  platform: mobile    │ (high, "mobile game")
+         │  tone: exciting      │ (med, "fast")
+         │  ...                 │
+         │ hard_constraints:    │
+         │  ["must be mobile"]  │
+         └──────────┬───────────┘
                     │
-         ┌──────────▼──────────┐
-         │  Memory Retrieval   │
-         │ "user prefers tap   │
-         │  controls, fast     │
-         │  pace games"        │
-         └──────────┬──────────┘
+         ┌──────────▼───────────┐
+         │ Stage B: Branches    │
+         │ + Memory Context     │
+         │                      │
+         │ B1: Neon Dash Runner │ (side_scroller, single_key)
+         │ B2: Sky Bounce       │ (2d_topdown, touch_tap)
+         │ B3: Obstacle Swipe   │ (side_scroller, touch_drag)
+         └──────────┬───────────┘
                     │
-         ┌──────────▼──────────┐
-         │  Generate Options   │
-         │ opt_1: Endless Run  │
-         │ opt_2: Tap Puzzle   │ ← recommended (matches memory)
-         │ opt_3: Idle Clicker │
-         └─────────────────────┘
+         ┌──────────▼───────────┐
+         │ Stage C: Mapper      │
+         │ B1 → runner_endless  │ ← recommended
+         │ B2 → platformer     │
+         │ B3 → runner_endless  │
+         └──────────┬───────────┘
+                    │
+              Option Cards shown
 ```
 
-### 2. Preview & Select
+### 2. Preview & Select (with AI Customization)
 
-- User clicks **Preview** on an option → iframe loads the template HTML via `GET /exploration/preview/{template_id}`
-- User clicks **Select** → template files are imported as a new `ProjectVersion`
-- Hypothesis ledger is initialized with empty arrays
+- User clicks **Preview** on an option → iframe loads the raw template HTML via `GET /exploration/preview/{template_id}`
+- User clicks **Select** → triggers **Stage D: Code Customizer**:
+  1. Template files are loaded
+  2. Option spec (title, core_loop, controls, mechanics) is read from DB
+  3. AI rewrites the template code to match the specific game design
+  4. Customized code is saved as a new `ProjectVersion`
+- Preview refreshes to show the **customized game**, not the generic template
 - State transitions to `committed`
 
 ### 3. Iterate
@@ -207,7 +348,7 @@ User: "I want a fun mobile game"
 User requests code modifications in natural language:
 
 1. Current version's files are loaded
-2. GPT receives the code + user request and returns modified files
+2. GPT receives the code + user request and returns modified files (`max_tokens: 8000`)
 3. A new `ProjectVersion` is created (immutable versioning)
 4. The user request is appended to `hypothesis_ledger.open_questions`
 5. Preview refreshes automatically
@@ -216,28 +357,29 @@ User requests code modifications in natural language:
 
 When the user clicks "Finish Exploration":
 
-1. GPT receives the full session data (user input, selected option, iterations, hypothesis ledger)
+1. GPT receives the full session data (user input, selected option, iterations, hypothesis ledger, decomposition)
 2. Generates a **structured memory** with: preferences, validated/rejected hypotheses, key decisions, pitfalls
 3. Saves `ExplorationMemoryNote` to database
 4. Updates `UserPreference` record (upsert)
 5. State transitions to `stable`
 
-The memory then influences all future explorations for this project.
+The memory then influences Stage B (branch synthesis) in all future explorations for this project.
 
 ---
 
 ## API Reference
 
-All endpoints are under `/api/v1/projects/{project_id}`.
+All exploration endpoints are under `/api/v1/projects/{project_id}`.
+Debug endpoints are under `/api/v1/debug`.
 
 ### POST `/explore`
 
-Start a new exploration session.
+Start a new exploration session. Runs Stages A → B → C.
 
 **Request:**
 ```json
 {
-  "user_input": "I want a fast-paced mobile platformer with coins"
+  "user_input": "I want a fast-paced mobile game where you tap to jump over obstacles"
 }
 ```
 
@@ -246,37 +388,95 @@ Start a new exploration session.
 {
   "session_id": 1,
   "ambiguity": {
-    "gameplay_type": {
-      "candidates": ["platformer","shooter","puzzle","runner","clicker","tower_defense"],
-      "detected": ["platformer"]
+    "summary": "A fast-paced mobile game with tap-to-jump controls over obstacles",
+    "dimensions": {
+      "controls": {
+        "candidates": ["touch_tap", "single_key"],
+        "confidence": "high",
+        "signals": ["tap to jump"]
+      },
+      "presentation": {
+        "candidates": ["side_scroller", "minimal_2d"],
+        "confidence": "med",
+        "signals": ["jump over things implies side view"]
+      },
+      "core_loop": {
+        "candidates": ["run_avoid", "jump_collect"],
+        "confidence": "high",
+        "signals": ["jump over obstacles"]
+      },
+      "goals": {
+        "candidates": ["high_score", "endless_survival"],
+        "confidence": "low",
+        "signals": []
+      },
+      "progression": {
+        "candidates": ["infinite"],
+        "confidence": "med",
+        "signals": ["no mention of levels"]
+      },
+      "systems": {
+        "candidates": ["physics", "collision", "spawner"],
+        "confidence": "med",
+        "signals": ["obstacles implies collision + spawning"]
+      },
+      "platform": {
+        "candidates": ["mobile"],
+        "confidence": "high",
+        "signals": ["mobile game"]
+      },
+      "tone": {
+        "candidates": ["exciting", "retro"],
+        "confidence": "med",
+        "signals": ["fast-paced"]
+      }
     },
-    "control_method": {
-      "candidates": ["keyboard","touch_tap","touch_swipe","mouse_click","auto"],
-      "detected": ["touch_tap"]
-    },
-    "pace": { "candidates": [...], "detected": ["fast"] },
-    "goal_structure": { "candidates": [...], "detected": ["level_clear","high_score"] },
-    "difficulty": { "candidates": [...], "detected": ["progressive"] },
-    "visual_complexity": { "candidates": [...], "detected": ["moderate"] },
-    "platform": { "candidates": [...], "detected": ["mobile"] }
+    "hard_constraints": ["must be mobile", "must use tap controls"],
+    "open_questions": [
+      {
+        "dimension": "goals",
+        "question": "Should the game be endless or have level-based progression?",
+        "why_it_matters": "Affects difficulty curve and replay value"
+      }
+    ]
   },
+  "branches": [
+    {
+      "branch_id": "B1",
+      "name": "Neon Dash Runner",
+      "picked": {
+        "controls": "single_key",
+        "presentation": "side_scroller",
+        "core_loop": "tap to jump over oncoming obstacles, earn points for distance",
+        "goals": "high_score",
+        "progression": "infinite",
+        "systems": ["physics", "collision", "spawner"],
+        "platform": "mobile",
+        "tone": "exciting"
+      },
+      "why_this_branch": ["Classic runner feel, simple single-input"],
+      "risks": ["May feel repetitive without variety"],
+      "what_to_validate": ["Is tap timing satisfying?"]
+    }
+  ],
   "options": [
     {
       "option_id": "opt_1",
-      "title": "Coin Rush Platformer",
-      "core_loop": "Jump across platforms collecting coins before time runs out",
-      "controls": "Tap left/right to move, tap up to jump",
-      "mechanics": ["jumping", "collecting", "timer"],
+      "branch_id": "B1",
+      "title": "Neon Dash Runner",
+      "core_loop": "Tap to jump over obstacles, earn points for distance",
+      "controls": "Single tap to jump",
+      "mechanics": ["jumping", "obstacles", "scoring", "speed_increase"],
       "engine": "Phaser",
-      "template_id": "platformer_basic",
-      "complexity": "medium",
+      "template_id": "runner_endless",
+      "complexity": "low",
       "mobile_fit": "good",
-      "assumptions_to_validate": ["Touch controls feel responsive", "Timer adds urgency"],
+      "assumptions_to_validate": ["Tap timing feels responsive"],
       "is_recommended": true
     }
   ],
   "memory_influence": {
-    "relevant_preferences": { "platform": "mobile", "pace": "fast" },
+    "relevant_preferences": { "platform": "mobile", "input": "tap" },
     "recurring_patterns": ["User prefers tap controls"],
     "warnings": ["Avoid complex multi-touch"],
     "suggested_direction_bias": { "input": "tap", "pace": "fast" }
@@ -286,7 +486,7 @@ Start a new exploration session.
 
 ### POST `/select_option`
 
-Select an option and import its template.
+Select an option. Runs Stage D (AI code customization) to produce a playable prototype.
 
 **Request:**
 ```json
@@ -306,9 +506,11 @@ Select an option and import its template.
 }
 ```
 
+The resulting `ProjectVersion` contains **AI-customized code** (not the raw template). The customizer adapts the template to match the option's core_loop, controls, mechanics, title, and the user's original request.
+
 ### POST `/iterate`
 
-Apply a code modification.
+Apply a code modification via AI.
 
 **Request:**
 ```json
@@ -352,8 +554,8 @@ Finish exploration and write structured memory.
     "id": 1,
     "project_id": "uuid-here",
     "content_json": {
-      "title": "Fast Mobile Platformer Exploration",
-      "summary": "Explored platformer options for mobile. Settled on tap-based controls with coin collecting.",
+      "title": "Fast Mobile Runner Exploration",
+      "summary": "Explored runner options for mobile. Settled on tap-to-jump with endless progression.",
       "user_preferences": {
         "platform": "mobile",
         "input": "tap",
@@ -364,12 +566,12 @@ Finish exploration and write structured memory.
       },
       "final_choice": { "option_id": "opt_1", "why": "Best match for mobile tap controls" },
       "validated_hypotheses": ["Tap controls feel responsive on mobile"],
-      "rejected_hypotheses": ["Swipe controls for movement"],
+      "rejected_hypotheses": ["Swipe controls for jumping"],
       "key_decisions": [
         {
-          "decision": "Use tap instead of virtual joystick",
-          "reason": "Simpler and more responsive",
-          "evidence": "User preferred tap after trying both"
+          "decision": "Use single tap instead of swipe",
+          "reason": "Lower latency and simpler input",
+          "evidence": "User chose tap-based option"
         }
       ],
       "pitfalls_and_guards": ["Avoid small tap targets on mobile"],
@@ -389,32 +591,29 @@ Finish exploration and write structured memory.
 
 Query current session state.
 
-**Response:**
-```json
-{
-  "session_id": 1,
-  "state": "iterating",
-  "selected_option_id": "opt_1",
-  "iteration_count": 2,
-  "hypothesis_ledger": {
-    "validated": ["Tap controls work well"],
-    "rejected": [],
-    "open_questions": ["Add double-jump"]
-  }
-}
-```
-
 ### GET `/exploration/memory_notes`
 
 List all memory notes for this project.
 
-**Response:** `MemoryNoteResponse[]`
-
 ### GET `/exploration/preview/{template_id}`
 
-Returns raw HTML content for iframe preview. Used during the `previewing` state.
+Returns raw HTML content for iframe preview. Used during the `previewing` state (before selection). Returns `text/html`.
 
-**Response:** `text/html` (the template's `index.html`)
+### GET `/api/v1/debug/openai_log`
+
+Returns all recent OpenAI call debug entries (max 50, ring buffer). Each entry includes:
+- `label`: Stage identifier (e.g. "A:decompose", "B:branches", "C:mapper", "D:customize", "iterate")
+- `timestamp`, `duration_ms`: Timing
+- `model`: OpenAI model used
+- `messages`: System + user messages sent
+- `raw_response`: Raw text from OpenAI
+- `parsed`: Parsed JSON result
+- `usage`: Token counts (prompt, completion, total)
+- `error`: Error message if call failed
+
+### DELETE `/api/v1/debug/openai_log`
+
+Clear the debug log.
 
 ---
 
@@ -429,7 +628,7 @@ Migration: `b2c3d4e5f6g7_add_exploration_tables.py`
 | `id` | `INTEGER` PK | Auto-increment |
 | `project_id` | `UUID` FK→projects.id | CASCADE delete |
 | `user_input` | `TEXT` | Original game description |
-| `ambiguity_json` | `JSONB` | 7-dimension decomposition |
+| `ambiguity_json` | `JSONB` | Stage A decomposition (8 dimensions + constraints + open questions) |
 | `state` | `VARCHAR(30)` | State machine value, default `explore_options` |
 | `selected_option_id` | `VARCHAR(100)` | Chosen option_id |
 | `hypothesis_ledger` | `JSONB` | `{validated[], rejected[], open_questions[]}` |
@@ -463,7 +662,7 @@ Migration: `b2c3d4e5f6g7_add_exploration_tables.py`
 | `project_id` | `UUID` FK→projects.id | CASCADE delete |
 | `content_json` | `JSONB` | Full `MemoryNoteContent` structure |
 | `tags` | `JSONB` | Searchable tags, e.g. `["platform:mobile"]` |
-| `confidence` | `FLOAT` | 0.0–1.0, default 0.8 |
+| `confidence` | `FLOAT` | 0.0-1.0, default 0.8 |
 | `source_version_id` | `INTEGER` | The stable version at finish time |
 | `source_session_id` | `INTEGER` FK→exploration_sessions.id | SET NULL on delete |
 | `created_at` | `TIMESTAMPTZ` | Auto |
@@ -485,7 +684,7 @@ Migration: `b2c3d4e5f6g7_add_exploration_tables.py`
 
 Main layout orchestrator. Split into:
 - **Left panel**: Preview (switches between `PreviewPanel` and template iframe)
-- **Right panel**: Three tabs — Explore, Iterate, Memory
+- **Right panel**: Four tabs — Explore, Iterate, Memory, Debug
 - **Toolbar**: Version toggle + state badge (color-coded)
 
 State badge colors:
@@ -504,10 +703,19 @@ Tab disable logic: **Iterate** tab is disabled until state reaches `committed` o
 The entry point for new explorations.
 
 **Sections:**
-1. **Input**: Textarea + "Explore Options" button (Cmd/Ctrl+Enter shortcut)
-2. **Ambiguity Display**: Detected dimensions shown as tags
-3. **Memory Influence Banner**: Shows when past preferences biased option generation
-4. **Options Grid**: Renders `OptionCard` for each generated option
+1. **Input Area**: Textarea + footer bar (keyboard shortcut hint + "Explore Options" button)
+2. **Error Banner**: Shows API errors with dismiss button
+3. **Decomposition Display** (after Stage A):
+   - Summary text
+   - **Dimension Grid**: 8 dimension cards, each showing:
+     - Dimension name (formatted from snake_case)
+     - Confidence badge (color-coded: green=high, yellow=med, red=low)
+     - Candidate tags
+     - Signal quotes
+   - **Hard Constraints**: Tag-style display
+   - **Open Questions**: Each with dimension, question text, and "why it matters"
+4. **Memory Influence Banner**: Shows when past preferences biased option generation
+5. **Options Grid**: Renders `OptionCard` for each generated option
 
 ### OptionCard (`components/exploration/OptionCard.tsx`)
 
@@ -519,8 +727,8 @@ Displays a single exploration option.
 - Details grid: Controls, Complexity (color-coded), Mobile Fit (color-coded)
 - Mechanics tags
 - Assumptions to validate (bulleted list)
-- **Preview** button → sets `previewing` state, shows template in iframe
-- **Select** button → calls `POST /select_option`, transitions to `committed`
+- **Preview** button → shows raw template in iframe (pre-customization preview)
+- **Select** button → triggers Stage D (AI customization), transitions to `committed`
 
 ### IteratePanel (`components/exploration/IteratePanel.tsx`)
 
@@ -528,9 +736,9 @@ Chat-like iteration interface after committing to an option.
 
 **Sections:**
 1. **Header**: Version badge (v1, v2...), selected option, "Finish Exploration" button
-2. **Hypothesis Ledger**: Three collapsible lists — Validated (green), Rejected (red), Open (yellow)
-3. **Iteration Log**: Timeline of user requests with timestamps
-4. **Input**: Textarea + "Apply Change" button (Cmd/Ctrl+Enter shortcut)
+2. **Hypothesis Ledger**: Three sections — Validated (green), Rejected (red), Open (yellow)
+3. **Iteration Log**: Timeline of user requests and system responses with timestamps
+4. **Input Area**: Textarea + footer bar (keyboard shortcut hint + "Apply Change" button)
 
 ### ExplorationMemoryPanel (`components/exploration/ExplorationMemoryPanel.tsx`)
 
@@ -539,13 +747,18 @@ Displays structured memory notes from completed explorations.
 **Each MemoryNoteCard shows:**
 - Title + confidence percentage (collapsed)
 - Summary, tags (always visible)
-- Expanded view:
-  - User Preferences grid
-  - Final Choice (option + reason)
-  - Validated Hypotheses
-  - Rejected Hypotheses
-  - Key Decisions (decision + reason + evidence)
-  - Pitfalls & Guards
+- Expanded view: User Preferences grid, Final Choice, Validated/Rejected Hypotheses, Key Decisions, Pitfalls & Guards
+
+### DebugPanel (`components/exploration/DebugPanel.tsx`)
+
+Displays all OpenAI API interactions for debugging.
+
+**Features:**
+- Fetches from `GET /api/v1/debug/openai_log`
+- Auto-refresh every 3 seconds
+- Manual refresh + clear buttons
+- Collapsible entries showing: label, model, duration, token counts, timestamp
+- Expanded view: system prompt, user message, raw response, parsed JSON, usage breakdown, errors
 
 ### Zustand Store (exploration slice)
 
@@ -559,10 +772,10 @@ previewingTemplateId: string | null     // template in iframe
 hypothesisLedger: HypothesisLedger | null
 iterationCount: number
 memoryNotes: MemoryNote[]
-ambiguity: Ambiguity | null
+ambiguity: Ambiguity | null            // Stage A decomposition
 memoryInfluence: MemoryInfluence | null
 isExploring: boolean                   // loading flag
-activeTab: 'explore' | 'iterate' | 'memory'
+activeTab: 'explore' | 'iterate' | 'memory' | 'debug'
 
 // Actions
 setExplorationState, setSessionId, setExplorationOptions,
@@ -575,7 +788,9 @@ setIsExploring, setActiveTab, resetExploration
 
 ## Template Catalog
 
-Six pre-built Phaser 3 game templates in `backend/app/templates/phaser_demos.py`:
+Six pre-built Phaser 3 game templates in `backend/app/templates/phaser_demos.py`.
+
+These serve as **starting points** for Stage D customization — they are not shown to users as-is (except during raw preview).
 
 | template_id | Title | Core Loop | Complexity | Mobile Fit |
 |---|---|---|---|---|
@@ -589,74 +804,79 @@ Six pre-built Phaser 3 game templates in `backend/app/templates/phaser_demos.py`
 ### Template Properties
 
 Each template entry contains:
-- `template_id`: Unique identifier used in API
-- `title`, `core_loop`, `controls`: Descriptive metadata
-- `mechanics`: Array of gameplay mechanics (e.g. `["jumping", "collecting"]`)
+- `template_id`: Unique identifier used in API and Stage C mapping
+- `title`, `core_loop`, `controls`: Descriptive metadata (fed to Stage C for matching)
+- `mechanics`: Array of gameplay mechanics
 - `complexity`: `low` / `medium` / `high`
-- `mobile_fit`: `excellent` / `good` / `fair` / `poor`
-- `tags`: Categorization for search
-- `files`: Array of `{file_path, file_type, content}` — complete HTML files
+- `mobile_fit`: `good` / `fair` / `poor`
+- `tags`: Categorization
+- `files`: Array of `{file_path, file_type, content}` — complete HTML files (fed to Stage D for customization)
 
 ### Template Constraints
 
-- All use **Phaser 3.60** from CDN (`https://cdn.jsdelivr.net/npm/phaser@3.60.0`)
+- All use **Phaser 3.60** from CDN
 - **No external assets** — all graphics rendered with Phaser primitives (rectangles, circles, text)
 - Each template is a single `index.html` file
-- Mobile-friendly with touch controls
+- Mobile-friendly with touch controls and `Scale.FIT`
 - Complete game loops with win/lose conditions
-
----
-
-## AI Prompts
-
-Four system prompts drive the AI interactions:
-
-### AMBIGUITY_DECOMPOSE_PROMPT
-
-**Input**: User's game description (free text)
-**Output**: JSON with 7 dimensions, each containing `candidates[]` and `detected[]`
-**Purpose**: Structure the vague input into analyzable dimensions without asking the user
-
-### OPTION_GENERATE_PROMPT
-
-**Input**: Template IDs, memory context, ambiguity analysis, user input
-**Output**: JSON array of 3-6 option objects
-**Rules**:
-- Options must differ significantly (not just parameter tweaks)
-- Exactly one `is_recommended: true`
-- Memory preferences bias recommendations
-- Each option maps to a real template_id
-
-### ITERATE_PROMPT
-
-**Input**: Current file contents (truncated to 3000 chars/file), user's modification request
-**Output**: JSON object mapping `file_path → new_content`
-**Rules**:
-- Minimal changes only
-- Maintain Phaser structure
-- Keep core game loop intact
-
-### MEMORY_WRITER_PROMPT
-
-**Input**: Full session data (user input, selected option, iterations, hypotheses, ambiguity)
-**Output**: Structured `MemoryNoteContent` JSON
-**Purpose**: Synthesize session into reusable structured knowledge
 
 ---
 
 ## Data Structures
 
-### Ambiguity (7 dimensions)
+### Decomposition (Stage A output)
 
 ```json
 {
-  "gameplay_type": { "candidates": ["platformer","shooter","puzzle","runner","clicker","tower_defense"], "detected": ["runner"] },
-  "control_method": { "candidates": ["keyboard","touch_tap","touch_swipe","mouse_click","auto"], "detected": ["touch_tap"] },
-  "pace": { "candidates": ["fast","medium","slow","idle"], "detected": ["fast"] },
-  "goal_structure": { "candidates": ["high_score","level_clear","endless","economy","survival"], "detected": ["endless"] },
-  "difficulty": { "candidates": ["easy","medium","hard","progressive"], "detected": ["progressive"] },
-  "visual_complexity": { "candidates": ["minimal","moderate","rich"], "detected": ["moderate"] },
-  "platform": { "candidates": ["mobile","desktop","both"], "detected": ["mobile"] }
+  "summary": "A fast-paced mobile runner with tap-to-jump controls",
+  "dimensions": {
+    "controls": {
+      "candidates": ["touch_tap", "single_key"],
+      "confidence": "high",
+      "signals": ["tap to jump"]
+    },
+    "presentation": {
+      "candidates": ["side_scroller", "minimal_2d"],
+      "confidence": "med",
+      "signals": ["jump over implies side view"]
+    },
+    "core_loop": { "candidates": ["run_avoid"], "confidence": "high", "signals": ["jump over obstacles"] },
+    "goals": { "candidates": ["high_score", "endless_survival"], "confidence": "low", "signals": [] },
+    "progression": { "candidates": ["infinite"], "confidence": "med", "signals": [] },
+    "systems": { "candidates": ["physics", "collision", "spawner"], "confidence": "med", "signals": [] },
+    "platform": { "candidates": ["mobile"], "confidence": "high", "signals": ["mobile game"] },
+    "tone": { "candidates": ["exciting"], "confidence": "med", "signals": ["fast-paced"] }
+  },
+  "hard_constraints": ["must be mobile", "must use tap controls"],
+  "open_questions": [
+    {
+      "dimension": "goals",
+      "question": "Should the game be endless or have levels?",
+      "why_it_matters": "Affects replay value and difficulty curve"
+    }
+  ]
+}
+```
+
+### Branch (Stage B output)
+
+```json
+{
+  "branch_id": "B1",
+  "name": "Neon Dash Runner",
+  "picked": {
+    "controls": "single_key",
+    "presentation": "side_scroller",
+    "core_loop": "tap to jump over oncoming obstacles, earn points for distance",
+    "goals": "high_score",
+    "progression": "infinite",
+    "systems": ["physics", "collision", "spawner"],
+    "platform": "mobile",
+    "tone": "exciting"
+  },
+  "why_this_branch": ["Classic runner feel, simple single-input"],
+  "risks": ["May feel repetitive without variety"],
+  "what_to_validate": ["Is tap timing satisfying?"]
 }
 ```
 
@@ -674,8 +894,8 @@ Four system prompts drive the AI interactions:
 
 ```json
 {
-  "title": "Mobile Platformer Exploration",
-  "summary": "Explored 4 platformer variants. Settled on tap-based coin collector.",
+  "title": "Mobile Runner Exploration",
+  "summary": "Explored 4 runner variants. Settled on tap-based endless runner.",
   "user_preferences": {
     "platform": "mobile",
     "input": "tap",
@@ -685,21 +905,21 @@ Four system prompts drive the AI interactions:
     "visual_density": "moderate"
   },
   "final_choice": {
-    "option_id": "opt_2",
+    "option_id": "opt_1",
     "why": "Best mobile UX with tap controls"
   },
-  "validated_hypotheses": ["Tap controls work well for platformers"],
+  "validated_hypotheses": ["Tap controls work well for runners"],
   "rejected_hypotheses": ["Swipe-to-jump is unintuitive"],
   "key_decisions": [
     {
-      "decision": "Use discrete tap zones instead of virtual joystick",
+      "decision": "Use single tap instead of swipe",
       "reason": "Lower latency and simpler mental model",
-      "evidence": "User switched from joystick to tap after 1 iteration"
+      "evidence": "User chose tap-based option over swipe variant"
     }
   ],
   "pitfalls_and_guards": [
     "Avoid small tap targets (min 44px)",
-    "Timer games can feel stressful on mobile"
+    "Endless games need visual variety to stay engaging"
   ],
   "refs": {
     "exploration_session_id": 3,
@@ -720,27 +940,24 @@ Four system prompts drive the AI interactions:
 }
 ```
 
-### Memory Tags
-
-Auto-extracted from memory content:
-```json
-["platform:mobile", "input:tap", "pace:fast", "chosen:opt_2"]
-```
-
 ---
 
 ## Design Principles
 
-1. **Explore phase never writes project code.** Options are read-only previews of existing templates. Only `select_option` commits code.
+1. **4-stage pipeline, not chat.** The system never asks clarifying questions. It decomposes → branches → maps → customizes in a single flow.
 
-2. **Memory stores conclusions, not chat.** No raw conversation is persisted. Only structured, validated knowledge enters memory.
+2. **AI customizes code, not just selects templates.** Stage D rewrites the template to match the specific game design. Users see their game idea, not a generic demo.
 
-3. **Options must be meaningfully different.** Not parameter variations — different gameplay, input methods, or core loops.
+3. **Branches must be meaningfully different.** Not parameter variations — branches differ on at least 2 major dimensions (controls, presentation, core_loop).
 
-4. **Iterations are versioned and rollbackable.** Every `iterate` call creates a new `ProjectVersion`. No destructive edits.
+4. **Memory biases, never blocks.** Past preferences influence branch synthesis (Stage B), but all branches remain available.
 
-5. **Memory biases, never blocks.** Past preferences influence the `is_recommended` flag and option ordering, but all options remain available.
+5. **Iterations are versioned and rollbackable.** Every `iterate` and `select_option` call creates a new `ProjectVersion`. No destructive edits.
 
-6. **Single-file templates.** Each Phaser game is a self-contained HTML file with no external dependencies beyond the Phaser CDN.
+6. **Memory stores conclusions, not chat.** No raw conversation is persisted. Only structured, validated knowledge enters memory.
 
-7. **Hypothesis tracking is lightweight.** The ledger accumulates user requests as `open_questions`. Validated/rejected status is determined at memory-writing time by AI.
+7. **Single-file templates.** Each Phaser game is a self-contained HTML file with no external dependencies beyond the Phaser CDN.
+
+8. **Every AI call is observable.** All OpenAI interactions are logged to an in-memory ring buffer (max 50 entries) and visible in the Debug tab with full request/response details.
+
+9. **Hypothesis tracking is lightweight.** The ledger accumulates user requests as `open_questions`. Validated/rejected status is determined at memory-writing time by AI.

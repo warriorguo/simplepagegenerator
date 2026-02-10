@@ -21,9 +21,11 @@ from app.schemas.exploration import (
     ExplorationStateResponse,
 )
 from app.services import exploration_service
+from app.services.exploration_service import get_debug_log, clear_debug_log
 from app.templates.phaser_demos import PHASER_DEMO_CATALOG
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["exploration"])
+debug_router = APIRouter(prefix="/api/v1/debug", tags=["debug"])
 
 
 def _get_template_ids() -> list[str]:
@@ -44,9 +46,10 @@ async def explore(
     db: AsyncSession = Depends(get_db),
     client: AsyncOpenAI = Depends(get_openai_client),
 ):
-    """Start exploration: decompose ambiguity, generate options."""
+    """Start exploration: A:decompose → B:branches → C:mapper → options."""
     result = await exploration_service.explore(
-        db, client, project_id, data.user_input, _get_template_ids()
+        db, client, project_id, data.user_input, _get_template_ids(),
+        template_catalog=PHASER_DEMO_CATALOG,
     )
     return result
 
@@ -56,8 +59,9 @@ async def select_option(
     project_id: uuid.UUID,
     data: SelectOptionRequest,
     db: AsyncSession = Depends(get_db),
+    client: AsyncOpenAI = Depends(get_openai_client),
 ):
-    """Select an option and import its template."""
+    """Select an option: customize template with AI and create initial version."""
     result = await db.execute(
         select(ExplorationOption).where(
             ExplorationOption.session_id == data.session_id,
@@ -74,7 +78,7 @@ async def select_option(
 
     try:
         result = await exploration_service.select_option(
-            db, project_id, data.session_id, data.option_id, template_files
+            db, client, project_id, data.session_id, data.option_id, template_files
         )
         return result
     except ValueError as e:
@@ -152,3 +156,18 @@ async def preview_template(
             return HTMLResponse(content=f["content"])
 
     raise HTTPException(status_code=404, detail="No index.html in template")
+
+
+# ─── Debug endpoints ──────────────────────────────────────
+
+@debug_router.get("/openai_log")
+async def get_openai_log():
+    """Return all recent OpenAI call debug entries."""
+    return get_debug_log()
+
+
+@debug_router.delete("/openai_log")
+async def delete_openai_log():
+    """Clear the OpenAI debug log."""
+    clear_debug_log()
+    return {"status": "cleared"}

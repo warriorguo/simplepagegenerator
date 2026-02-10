@@ -25,6 +25,7 @@ class OptionResponse(BaseModel):
 class ExploreResponse(BaseModel):
     session_id: int
     ambiguity: dict
+    branches: list[dict] | None = None
     options: list[OptionResponse]
     memory_influence: dict | None = None
 

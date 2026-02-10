@@ -2,9 +2,16 @@ import { useState } from 'react'
 import { useStore } from '../../store'
 import OptionCard from './OptionCard'
 import { explore, selectOption } from '../../api/exploration'
+import type { Decomposition } from '../../types/exploration'
 
 interface Props {
   projectId: string
+}
+
+const CONFIDENCE_COLORS: Record<string, string> = {
+  high: 'conf-high',
+  med: 'conf-med',
+  low: 'conf-low',
 }
 
 export default function ExplorePanel({ projectId }: Props) {
@@ -27,11 +34,13 @@ export default function ExplorePanel({ projectId }: Props) {
   } = useStore()
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const handleExplore = async () => {
     if (!input.trim() || loading) return
     setLoading(true)
     setIsExploring(true)
+    setError(null)
     try {
       const result = await explore(projectId, input.trim())
       setSessionId(result.session_id)
@@ -39,7 +48,9 @@ export default function ExplorePanel({ projectId }: Props) {
       setAmbiguity(result.ambiguity)
       setMemoryInfluence(result.memory_influence)
       setExplorationState('explore_options')
-    } catch (err) {
+    } catch (err: any) {
+      const msg = err?.response?.data?.detail || err?.message || 'Explore failed'
+      setError(msg)
       console.error('Explore failed:', err)
     } finally {
       setLoading(false)
@@ -55,67 +66,119 @@ export default function ExplorePanel({ projectId }: Props) {
   const handleSelect = async (optionId: string) => {
     if (!sessionId) return
     setLoading(true)
+    setError(null)
     try {
       const result = await selectOption(projectId, sessionId, optionId)
       setSelectedOptionId(optionId)
       setExplorationState('committed')
       setActiveTab('iterate')
       refreshPreview()
-    } catch (err) {
+    } catch (err: any) {
+      const msg = err?.response?.data?.detail || err?.message || 'Select failed'
+      setError(msg)
       console.error('Select failed:', err)
     } finally {
       setLoading(false)
     }
   }
 
+  // Try to use new Decomposition structure, fallback for old format
+  const decomp = ambiguity as Decomposition | null
+  const hasDimensions = decomp && decomp.dimensions && typeof decomp.dimensions === 'object'
+
   return (
     <div className="explore-panel">
       <div className="explore-input-area">
-        <h3>Describe Your Game</h3>
         <textarea
           className="explore-input"
-          placeholder="e.g., I want a simple mobile game where you tap to jump over obstacles..."
+          placeholder="Describe your game idea, e.g. a simple mobile game where you tap to jump over obstacles..."
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          rows={3}
+          rows={4}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleExplore()
           }}
         />
-        <button
-          className="btn-primary explore-btn"
-          onClick={handleExplore}
-          disabled={loading || !input.trim()}
-        >
-          {loading ? 'Analyzing...' : 'Explore Options'}
-        </button>
+        <div className="explore-input-footer">
+          <span className="explore-input-hint">
+            {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Enter
+          </span>
+          <button
+            className="btn-primary explore-btn"
+            onClick={handleExplore}
+            disabled={loading || !input.trim()}
+          >
+            {loading ? 'Analyzing...' : 'Explore Options'}
+          </button>
+        </div>
       </div>
 
-      {ambiguity && (
-        <div className="explore-ambiguity">
-          <h4>Detected Dimensions</h4>
-          <div className="ambiguity-tags">
-            {Object.entries(ambiguity).map(([key, val]) => {
-              const detected = (val as any)?.detected
-              if (!Array.isArray(detected)) return null
-              return (
-                <div key={key} className="ambiguity-dimension">
-                  <span className="ambiguity-key">{key.replace(/_/g, ' ')}</span>
-                  <span className="ambiguity-values">
-                    {detected.map((d: string) => (
-                      <span key={d} className="ambiguity-tag">{d}</span>
-                    ))}
+      {error && (
+        <div className="explore-error">
+          <span className="explore-error-icon">!</span>
+          <span className="explore-error-msg">{error}</span>
+          <button className="explore-error-close" onClick={() => setError(null)}>&times;</button>
+        </div>
+      )}
+
+      {hasDimensions && (
+        <div className="explore-decomposition">
+          {decomp.summary && (
+            <div className="decomp-summary">{decomp.summary}</div>
+          )}
+
+          <h4>Implementation Dimensions</h4>
+          <div className="decomp-grid">
+            {Object.entries(decomp.dimensions).map(([key, dim]) => (
+              <div key={key} className="decomp-dim">
+                <div className="decomp-dim-header">
+                  <span className="decomp-dim-name">{key.replace(/_/g, ' ')}</span>
+                  <span className={`decomp-confidence ${CONFIDENCE_COLORS[dim.confidence] || ''}`}>
+                    {dim.confidence}
                   </span>
                 </div>
-              )
-            })}
+                <div className="decomp-candidates">
+                  {dim.candidates.map((c: string) => (
+                    <span key={c} className="decomp-candidate">{c}</span>
+                  ))}
+                </div>
+                {dim.signals && dim.signals.length > 0 && (
+                  <div className="decomp-signals">
+                    {dim.signals.map((s: string, i: number) => (
+                      <span key={i} className="decomp-signal">{s}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
+
+          {decomp.hard_constraints && decomp.hard_constraints.length > 0 && (
+            <div className="decomp-constraints">
+              <h5>Hard Constraints</h5>
+              {decomp.hard_constraints.map((c, i) => (
+                <span key={i} className="constraint-tag">{c}</span>
+              ))}
+            </div>
+          )}
+
+          {decomp.open_questions && decomp.open_questions.length > 0 && (
+            <div className="decomp-questions">
+              <h5>Open Questions</h5>
+              {decomp.open_questions.map((q, i) => (
+                <div key={i} className="open-question">
+                  <span className="oq-dim">{q.dimension}</span>
+                  <span className="oq-text">{q.question}</span>
+                  <span className="oq-why">{q.why_it_matters}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       {memoryInfluence && Object.keys(memoryInfluence).length > 0 && (
         <div className="memory-influence-banner">
-          <span className="memory-influence-icon">&#9733;</span>
           Options influenced by your past preferences
         </div>
       )}

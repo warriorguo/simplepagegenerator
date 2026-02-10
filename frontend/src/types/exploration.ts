@@ -29,12 +29,36 @@ export interface HypothesisLedger {
 
 export interface AmbiguityDimension {
   candidates: string[]
-  detected: string[]
+  confidence: 'high' | 'med' | 'low'
+  signals: string[]
+  // backward compat
+  detected?: string[]
 }
 
-export interface Ambiguity {
-  [key: string]: AmbiguityDimension
+export interface OpenQuestion {
+  dimension: string
+  question: string
+  why_it_matters: string
 }
+
+export interface Decomposition {
+  summary: string
+  dimensions: Record<string, AmbiguityDimension>
+  hard_constraints: string[]
+  open_questions: OpenQuestion[]
+}
+
+export interface Branch {
+  branch_id: string
+  name: string
+  picked: Record<string, string | string[]>
+  why_this_branch: string[]
+  risks: string[]
+  what_to_validate: string[]
+}
+
+// Keep backward compat alias
+export type Ambiguity = Decomposition | Record<string, AmbiguityDimension>
 
 export interface MemoryInfluence {
   relevant_preferences: Record<string, unknown>
@@ -45,7 +69,8 @@ export interface MemoryInfluence {
 
 export interface ExploreResponse {
   session_id: number
-  ambiguity: Ambiguity
+  ambiguity: Decomposition
+  branches: Branch[] | null
   options: ExplorationOption[]
   memory_influence: MemoryInfluence | null
 }
