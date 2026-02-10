@@ -174,11 +174,11 @@ PHASER_DEMO_CATALOG = [
             // Movement
             const speed = 200;
 
-            if (cursors.left.isDown || touchLeft.input.activePointer.isDown &&
-                this.input.activePointer.x < 120) {
+            if (cursors.left.isDown || (touchLeft.input?.activePointer?.isDown &&
+                this.input.activePointer.x < 120)) {
                 player.body.setVelocityX(-speed);
-            } else if (cursors.right.isDown || touchRight.input.activePointer.isDown &&
-                       this.input.activePointer.x > 120 && this.input.activePointer.x < 230) {
+            } else if (cursors.right.isDown || (touchRight.input?.activePointer?.isDown &&
+                       this.input.activePointer.x > 120 && this.input.activePointer.x < 230)) {
                 player.body.setVelocityX(speed);
             } else {
                 player.body.setVelocityX(0);
