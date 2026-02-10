@@ -96,3 +96,14 @@ class ExplorationStateResponse(BaseModel):
     selected_option_id: str | None
     iteration_count: int
     hypothesis_ledger: dict | None
+
+
+class ActiveSessionResponse(BaseModel):
+    session_id: int
+    state: str
+    user_input: str
+    ambiguity: dict | None
+    options: list[OptionResponse]
+    selected_option_id: str | None
+    hypothesis_ledger: dict | None
+    iteration_count: int

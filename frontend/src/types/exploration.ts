@@ -132,3 +132,14 @@ export interface ExplorationSessionState {
   iteration_count: number
   hypothesis_ledger: HypothesisLedger | null
 }
+
+export interface ActiveSessionResponse {
+  session_id: number
+  state: string
+  user_input: string
+  ambiguity: Decomposition | null
+  options: ExplorationOption[]
+  selected_option_id: string | null
+  hypothesis_ledger: HypothesisLedger | null
+  iteration_count: number
+}

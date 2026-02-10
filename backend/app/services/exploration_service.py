@@ -1244,6 +1244,56 @@ async def get_session_state(
     }
 
 
+async def get_active_session_full(
+    db: AsyncSession, project_id: uuid.UUID
+) -> dict | None:
+    """Get the most recent non-stable exploration session with its options."""
+    result = await db.execute(
+        select(ExplorationSession)
+        .where(
+            ExplorationSession.project_id == project_id,
+            ExplorationSession.state != "stable",
+        )
+        .order_by(ExplorationSession.created_at.desc())
+        .limit(1)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        return None
+
+    result = await db.execute(
+        select(ExplorationOption)
+        .where(ExplorationOption.session_id == session.id)
+    )
+    options = list(result.scalars().all())
+
+    return {
+        "session_id": session.id,
+        "state": session.state,
+        "user_input": session.user_input,
+        "ambiguity": session.ambiguity_json,
+        "options": [
+            {
+                "option_id": o.option_id,
+                "title": o.title,
+                "core_loop": o.core_loop,
+                "controls": o.controls,
+                "mechanics": o.mechanics if isinstance(o.mechanics, list) else [],
+                "engine": "Phaser",
+                "template_id": o.template_id,
+                "complexity": o.complexity,
+                "mobile_fit": o.mobile_fit,
+                "assumptions_to_validate": o.assumptions_to_validate if isinstance(o.assumptions_to_validate, list) else [],
+                "is_recommended": o.is_recommended,
+            }
+            for o in options
+        ],
+        "selected_option_id": session.selected_option_id,
+        "hypothesis_ledger": session.hypothesis_ledger,
+        "iteration_count": session.iteration_count,
+    }
+
+
 async def list_memory_notes(
     db: AsyncSession, project_id: uuid.UUID
 ) -> list[ExplorationMemoryNote]:

@@ -10,6 +10,7 @@ import VersionList from '../components/version/VersionList'
 import MemoryPanel from '../components/memory/MemoryPanel'
 import { useProject } from '../hooks/useProject'
 import { useMemories } from '../hooks/useMemories'
+import { useExplorationSession } from '../hooks/useExplorationSession'
 import { useStore } from '../store'
 import '../styles/editor.css'
 import '../styles/exploration.css'
@@ -18,6 +19,7 @@ export default function EditorPage() {
   const { id } = useParams<{ id: string }>()
   const project = useProject(id)
   useMemories(id)
+  useExplorationSession(id)
   const [showVersions, setShowVersions] = useState(false)
 
   const {

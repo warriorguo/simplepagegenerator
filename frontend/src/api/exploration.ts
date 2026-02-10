@@ -6,6 +6,7 @@ import type {
   FinishExplorationResponse,
   MemoryNote,
   ExplorationSessionState,
+  ActiveSessionResponse,
 } from '../types/exploration'
 
 export function explore(projectId: string, userInput: string) {
@@ -34,6 +35,10 @@ export function finishExploration(projectId: string, sessionId: number) {
     method: 'POST',
     body: JSON.stringify({ session_id: sessionId }),
   })
+}
+
+export function getActiveSession(projectId: string) {
+  return apiFetch<ActiveSessionResponse>(`/projects/${projectId}/exploration/active`)
 }
 
 export function getExplorationState(projectId: string, sessionId: number) {

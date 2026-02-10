@@ -19,6 +19,7 @@ from app.schemas.exploration import (
     FinishExplorationResponse,
     MemoryNoteResponse,
     ExplorationStateResponse,
+    ActiveSessionResponse,
 )
 from app.services import exploration_service
 from app.services.exploration_service import get_debug_log, clear_debug_log
@@ -117,6 +118,18 @@ async def finish_exploration(
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/exploration/active", response_model=ActiveSessionResponse)
+async def get_active_session(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the most recent active (non-stable) exploration session with options."""
+    result = await exploration_service.get_active_session_full(db, project_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="No active exploration session")
+    return result
 
 
 @router.get("/exploration/state/{session_id}", response_model=ExplorationStateResponse)
