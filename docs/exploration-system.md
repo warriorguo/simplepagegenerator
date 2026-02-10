@@ -130,13 +130,14 @@ User Input
 │ Stage A: Decomposer            decompose_requirements()│
 │                                                        │
 │  ┌─ Fresh (no game code) ──┐  ┌─ Contextual ────────┐ │
-│  │ Fixed 8 dimensions      │  │ Reads current code + │ │
-│  │ Label: A:decompose      │  │ past decisions       │ │
-│  │        (fresh)          │  │ Dynamic dimensions   │ │
-│  └─────────────────────────┘  │ + locked items       │ │
-│                               │ Label: A:decompose   │ │
-│  Auto-selected based on       │        (contextual)  │ │
-│  whether project has code     └──────────────────────┘ │
+│  │ Reference 8 dims, only  │  │ Reads current code + │ │
+│  │ includes ambiguous ones │  │ past decisions       │ │
+│  │ Label: A:decompose      │  │ Dynamic dimensions   │ │
+│  │        (fresh)          │  │ + locked items       │ │
+│  └─────────────────────────┘  │ Label: A:decompose   │ │
+│                               │        (contextual)  │ │
+│  Dimension count driven by    └──────────────────────┘ │
+│  actual ambiguity (1 to N)                             │
 │                                max_tokens: 4000        │
 └───────────────────┬────────────────────────────────────┘
                     │ dimensions JSON (+ optional locked)
@@ -175,9 +176,11 @@ Stage A **auto-detects context** at runtime. If the project already has game cod
 **When**: First exploration, no existing game code.
 **Label**: `A:decompose(fresh)`
 **Input**: User's free-text game description
-**Output**: JSON with `summary`, `dimensions` (fixed 8), `hard_constraints`, `open_questions`
+**Output**: JSON with `summary`, `dimensions` (only ambiguous ones), `hard_constraints`, `open_questions`
 
-Decomposes the user's request into **8 generic implementation dimensions**:
+Uses **8 reference dimensions** as a guide, but **only includes those where real ambiguity exists** (2+ plausible candidates). Clear decisions go into `hard_constraints` instead. The prompt may also create custom dimensions beyond the reference set (e.g. `enemy_behavior`, `scoring_model`).
+
+Reference dimensions:
 
 | Dimension | Example Candidates | Purpose |
 |---|---|---|
@@ -190,6 +193,8 @@ Decomposes the user's request into **8 generic implementation dimensions**:
 | `platform` | mobile, desktop, both | Target device |
 | `tone` | exciting, relaxing, tense, cute, retro, minimal | Emotional feel |
 
+For a very specific request like "a mobile tap-to-jump endless runner", most dimensions are clear — only 1-2 ambiguous ones (e.g. `tone`, `goals`) would appear as dimensions, while the rest become `hard_constraints`. For a vague request like "a fun game", many dimensions would be expanded.
+
 #### Contextual Mode — `STAGE_A_CONTEXTUAL_PROMPT`
 
 **When**: Project already has game code (re-exploration after select/iterate).
@@ -199,6 +204,8 @@ Decomposes the user's request into **8 generic implementation dimensions**:
 
 Instead of re-analyzing generic dimensions that are already decided (controls, platform, etc.), generates **specific, actionable dimensions** relevant to the current request.
 
+The number of dimensions depends on actual ambiguity — if the request is specific ("add a shield power-up that lasts 5 seconds"), only 1-2 dimensions may appear. If vague ("add power-ups and a boss fight"), more are generated.
+
 Example: user has an existing endless runner and requests "add power-ups and a boss fight":
 
 | Generated Dimension | Candidates | Why |
@@ -207,8 +214,6 @@ Example: user has an existing endless runner and requests "add power-ups and a b
 | `power_up_spawn` | random_interval, fixed_positions, after_milestones | When/where power-ups appear |
 | `boss_attack_pattern` | projectile_barrage, charge_dash, area_denial | How the boss behaves |
 | `boss_frequency` | every_500_points, every_60_seconds, after_3_waves | When bosses appear |
-| `difficulty_scaling` | increase_speed, more_obstacles, shorter_gaps | How difficulty ramps |
-| `reward_feedback` | screen_flash, score_multiplier, particle_burst | How the player knows they succeeded |
 
 The `locked` field lists what's already decided and should not change:
 ```json
@@ -223,12 +228,14 @@ The `locked` field lists what's already decided and should not change:
 #### Shared Dimension Format
 
 Both modes produce dimensions with the same internal structure:
-- **candidates**: 2-4 possible values
+- **candidates**: 2-4 possible values (a dimension is only created when there are 2+ plausible options)
 - **confidence**: `high` | `med` | `low` — how certain the AI is based on user text
 - **signals**: Direct quotes or inferences from the user's text
 
-Both also extract:
-- **hard_constraints**: Things the user explicitly required or excluded
+Key principle: **dimension count follows ambiguity**. A very specific request may produce 1 dimension; a vague one may produce 8+. There is no fixed minimum or maximum.
+
+Both modes also extract:
+- **hard_constraints**: Things the user explicitly required or excluded (including clear decisions that don't need a dimension)
 - **open_questions**: Ambiguities worth investigating, with `dimension`, `question`, `why_it_matters`
 
 #### How Context Is Built
@@ -722,7 +729,7 @@ Migration: `b2c3d4e5f6g7_add_exploration_tables.py`
 | `id` | `INTEGER` PK | Auto-increment |
 | `project_id` | `UUID` FK→projects.id | CASCADE delete |
 | `user_input` | `TEXT` | Original game description |
-| `ambiguity_json` | `JSONB` | Stage A decomposition (fresh: 8 fixed dims, or contextual: dynamic dims + locked) |
+| `ambiguity_json` | `JSONB` | Stage A decomposition (ambiguous dimensions only, count varies; contextual mode adds locked) |
 | `state` | `VARCHAR(30)` | State machine value, default `explore_options` |
 | `selected_option_id` | `VARCHAR(100)` | Chosen option_id |
 | `hypothesis_ledger` | `JSONB` | `{validated[], rejected[], open_questions[]}` |
@@ -802,7 +809,7 @@ The entry point for new explorations.
 3. **Decomposition Display** (after Stage A):
    - Summary text
    - **Already Decided** (contextual mode only): Green tag list of locked decisions
-   - **Dimension Grid**: Dimension cards (8 fixed or 3-8 dynamic), each showing:
+   - **Dimension Grid**: Dimension cards (only ambiguous ones, count varies), each showing:
      - Dimension name (formatted from snake_case)
      - Confidence badge (color-coded: green=high, yellow=med, red=low)
      - Candidate tags
@@ -1094,7 +1101,7 @@ Each template entry contains:
 
 1. **4-stage pipeline, not chat.** The system never asks clarifying questions. It decomposes → branches → maps → customizes in a single flow.
 
-2. **Decomposition adapts to context.** Fresh explorations use generic 8 dimensions for broad design space coverage. Re-explorations on existing games generate specific, actionable dimensions (e.g. `power_up_types`, `boss_frequency`) while locking already-decided choices.
+2. **Decomposition adapts to context and ambiguity.** Dimension count is driven by actual ambiguity — a specific request may produce 1 dimension, a vague one may produce 8+. Fresh explorations use reference dimensions as a guide; re-explorations on existing games generate specific, actionable dimensions (e.g. `power_up_types`, `boss_frequency`) while locking already-decided choices. Clear decisions become `hard_constraints`, not dimensions.
 
 3. **AI customizes code, not just selects templates.** Stage D rewrites the template to match the specific game design. Users see their game idea, not a generic demo.
 

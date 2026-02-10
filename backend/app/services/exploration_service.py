@@ -26,53 +26,28 @@ from app.models.project_file import ProjectFile
 # Stage A: Requirement Decomposer — user request → implementation dimensions
 STAGE_A_DECOMPOSER_PROMPT = """You are an implementation-oriented requirement decomposer for Phaser web games.
 
-Given the user's request, decompose it into implementation dimensions.
+Given the user's request, identify the design decisions where ambiguity exists.
 Do NOT propose solutions yet.
+
+Reference dimensions (use these as a guide, but ONLY include ones that are actually ambiguous):
+- controls: keyboard, mouse_click, touch_tap, touch_drag, virtual_joystick, auto, single_key
+- presentation: 2d_topdown, side_scroller, isometric, minimal_2d
+- core_loop: move_dodge_shoot, jump_collect, match_clear, click_upgrade, build_defend, run_avoid
+- goals: high_score, level_clear, endless_survival, economy_growth, time_attack
+- progression: infinite, levels, missions, freeform
+- systems: physics, collision, simple_ai, projectiles, grid, economy, spawner
+- platform: mobile, desktop, both
+- tone: exciting, relaxing, tense, cute, retro, minimal
 
 Output JSON only:
 
 {{
   "summary": "one-sentence restatement of what the user wants",
   "dimensions": {{
-    "controls": {{
-      "candidates": ["keyboard", "mouse_click", "touch_tap", "touch_drag", "virtual_joystick", "auto", "single_key"],
+    "<dimension_name>": {{
+      "candidates": ["option_a", "option_b"],
       "confidence": "high|med|low",
       "signals": ["quotes or inferences from user text"]
-    }},
-    "presentation": {{
-      "candidates": ["2d_topdown", "side_scroller", "isometric", "minimal_2d"],
-      "confidence": "high|med|low",
-      "signals": [...]
-    }},
-    "core_loop": {{
-      "candidates": ["move_dodge_shoot", "jump_collect", "match_clear", "click_upgrade", "build_defend", "run_avoid"],
-      "confidence": "high|med|low",
-      "signals": [...]
-    }},
-    "goals": {{
-      "candidates": ["high_score", "level_clear", "endless_survival", "economy_growth", "time_attack"],
-      "confidence": "high|med|low",
-      "signals": [...]
-    }},
-    "progression": {{
-      "candidates": ["infinite", "levels", "missions", "freeform"],
-      "confidence": "high|med|low",
-      "signals": [...]
-    }},
-    "systems": {{
-      "candidates": ["physics", "collision", "simple_ai", "projectiles", "grid", "economy", "spawner"],
-      "confidence": "high|med|low",
-      "signals": [...]
-    }},
-    "platform": {{
-      "candidates": ["mobile", "desktop", "both"],
-      "confidence": "high|med|low",
-      "signals": [...]
-    }},
-    "tone": {{
-      "candidates": ["exciting", "relaxing", "tense", "cute", "retro", "minimal"],
-      "confidence": "high|med|low",
-      "signals": [...]
     }}
   }},
   "hard_constraints": ["things the user explicitly required or excluded"],
@@ -82,9 +57,13 @@ Output JSON only:
 }}
 
 Rules:
-- Each dimension must have 1-4 candidates. More candidates = more ambiguity.
-- Infer from text; if info is missing, mark confidence "low".
-- "signals" are direct quotes or logical inferences.
+- ONLY include dimensions where real ambiguity exists (2+ plausible candidates).
+  If the user's intent is clear for a dimension, do NOT include it — put it in hard_constraints instead.
+- If the request is very specific, you may output just 1-2 dimensions. If it is very vague, output more.
+  There is no minimum or maximum — let the actual ambiguity decide.
+- Each included dimension must have 2-4 candidates. More candidates = more ambiguity.
+- You may use the reference dimensions above, or create custom ones if needed (e.g. "enemy_behavior", "scoring_model").
+- "signals" are direct quotes or logical inferences from user text.
 - Return valid JSON only, no markdown."""
 
 
@@ -125,10 +104,13 @@ Output JSON only:
 }}
 
 Rules:
-- Generate 3-8 dimensions that are SPECIFIC to the request, not generic game design dimensions.
+- ONLY include dimensions where real ambiguity exists (2+ plausible candidates).
+  If something is obvious from context, do NOT create a dimension for it.
+- If the request is very specific, you may output just 1 dimension. If it is vague, output more.
+  There is no minimum or maximum — let the actual ambiguity decide.
+- Each included dimension must have 2-4 candidates.
 - Dimension names should be descriptive snake_case: e.g. "power_up_types", "boss_attack_pattern",
   "difficulty_curve", "spawn_frequency", "reward_structure", "animation_style".
-- Each dimension must have 2-4 candidates.
 - "locked" lists decisions already made in the existing game that should be preserved.
 - Focus on implementation choices, not high-level design.
 - Return valid JSON only, no markdown."""
