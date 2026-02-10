@@ -41,8 +41,14 @@ export interface OpenQuestion {
   why_it_matters: string
 }
 
+export interface LockedContext {
+  description: string
+  items: string[]
+}
+
 export interface Decomposition {
   summary: string
+  locked?: LockedContext
   dimensions: Record<string, AmbiguityDimension>
   hard_constraints: string[]
   open_questions: OpenQuestion[]

@@ -20,11 +20,12 @@
 
 ## Overview
 
-The Exploration System is the core interaction model for SimplePageGenerator's game prototyping workflow. Rather than asking users clarifying questions about their game idea, the system **decomposes requirements into 8 implementation dimensions**, **synthesizes divergent design branches**, **maps branches to runnable Phaser 3 templates**, and **customizes the code with AI** to produce a playable prototype matching the user's intent. All conclusions are captured as **structured memory** that biases future explorations.
+The Exploration System is the core interaction model for SimplePageGenerator's game prototyping workflow. Rather than asking users clarifying questions about their game idea, the system **decomposes requirements into implementation dimensions**, **synthesizes divergent design branches**, **maps branches to runnable Phaser 3 templates**, and **customizes the code with AI** to produce a playable prototype matching the user's intent. All conclusions are captured as **structured memory** that biases future explorations.
 
 ### Key Characteristics
 
 - **Option-First**: No clarifying questions. Ambiguity is decomposed internally and explored through concrete, playable options.
+- **Adaptive Decomposer**: Stage A auto-detects context — uses generic 8 dimensions for a blank slate, or generates specific contextual dimensions when a game already exists.
 - **4-Stage AI Pipeline**: Decompose → Branch → Map → Customize. Each stage has a dedicated prompt and debug logging.
 - **AI-Customized Code**: Selecting an option doesn't just copy a preset demo — the template is rewritten by AI to match the specific game design.
 - **Closed-Loop Memory**: Each exploration session produces structured conclusions that influence future sessions.
@@ -125,18 +126,26 @@ The explore flow chains four AI stages, each with a dedicated system prompt. Eve
 User Input
     │
     ▼
-┌───────────────────────────┐
-│ Stage A: Decomposer       │  decompose_requirements()
-│ User text → 8 dimensions  │  Label: "A:decompose"
-│ + hard constraints        │  max_tokens: 4000
-│ + open questions          │
-└─────────┬─────────────────┘
-          │ dimensions JSON
-          ▼
+┌───────────────────────────────────────────────────────┐
+│ Stage A: Decomposer            decompose_requirements()│
+│                                                        │
+│  ┌─ Fresh (no game code) ──┐  ┌─ Contextual ────────┐ │
+│  │ Fixed 8 dimensions      │  │ Reads current code + │ │
+│  │ Label: A:decompose      │  │ past decisions       │ │
+│  │        (fresh)          │  │ Dynamic dimensions   │ │
+│  └─────────────────────────┘  │ + locked items       │ │
+│                               │ Label: A:decompose   │ │
+│  Auto-selected based on       │        (contextual)  │ │
+│  whether project has code     └──────────────────────┘ │
+│                                max_tokens: 4000        │
+└───────────────────┬────────────────────────────────────┘
+                    │ dimensions JSON (+ optional locked)
+                    ▼
 ┌───────────────────────────┐
 │ Stage B: Branch Synth     │  synthesize_branches()
 │ Dimensions + memory       │  Label: "B:branches"
-│ → 3-6 divergent branches  │  max_tokens: 4000
+│ + locked constraints      │  max_tokens: 4000
+│ → 3-6 divergent branches  │
 └─────────┬─────────────────┘
           │ branches JSON
           ▼
@@ -157,13 +166,18 @@ User Input
 └───────────────────────────┘
 ```
 
-### Stage A: Requirement Decomposer
+### Stage A: Requirement Decomposer (Dual-Mode)
 
-**Prompt**: `STAGE_A_DECOMPOSER_PROMPT`
+Stage A **auto-detects context** at runtime. If the project already has game code (a `current_version_id` with files), the contextual decomposer is used. Otherwise, the fresh decomposer runs.
+
+#### Fresh Mode — `STAGE_A_DECOMPOSER_PROMPT`
+
+**When**: First exploration, no existing game code.
+**Label**: `A:decompose(fresh)`
 **Input**: User's free-text game description
-**Output**: JSON with `summary`, `dimensions`, `hard_constraints`, `open_questions`
+**Output**: JSON with `summary`, `dimensions` (fixed 8), `hard_constraints`, `open_questions`
 
-Decomposes the user's request into **8 implementation dimensions**:
+Decomposes the user's request into **8 generic implementation dimensions**:
 
 | Dimension | Example Candidates | Purpose |
 |---|---|---|
@@ -176,24 +190,67 @@ Decomposes the user's request into **8 implementation dimensions**:
 | `platform` | mobile, desktop, both | Target device |
 | `tone` | exciting, relaxing, tense, cute, retro, minimal | Emotional feel |
 
-Each dimension contains:
-- **candidates**: 1-4 possible values (more = more ambiguity)
+#### Contextual Mode — `STAGE_A_CONTEXTUAL_PROMPT`
+
+**When**: Project already has game code (re-exploration after select/iterate).
+**Label**: `A:decompose(contextual)`
+**Input**: User's new request + current game code (truncated to 3000 chars/file) + decided context (selected option details, iteration history, validated/rejected hypotheses)
+**Output**: JSON with `summary`, `locked`, `dimensions` (dynamic 3-8), `hard_constraints`, `open_questions`
+
+Instead of re-analyzing generic dimensions that are already decided (controls, platform, etc.), generates **specific, actionable dimensions** relevant to the current request.
+
+Example: user has an existing endless runner and requests "add power-ups and a boss fight":
+
+| Generated Dimension | Candidates | Why |
+|---|---|---|
+| `power_up_types` | speed_boost, shield, magnet, double_score | What power-ups to implement |
+| `power_up_spawn` | random_interval, fixed_positions, after_milestones | When/where power-ups appear |
+| `boss_attack_pattern` | projectile_barrage, charge_dash, area_denial | How the boss behaves |
+| `boss_frequency` | every_500_points, every_60_seconds, after_3_waves | When bosses appear |
+| `difficulty_scaling` | increase_speed, more_obstacles, shorter_gaps | How difficulty ramps |
+| `reward_feedback` | screen_flash, score_multiplier, particle_burst | How the player knows they succeeded |
+
+The `locked` field lists what's already decided and should not change:
+```json
+{
+  "locked": {
+    "description": "things already decided that should NOT change",
+    "items": ["controls: touch_tap", "presentation: side_scroller", "core_loop: run_avoid"]
+  }
+}
+```
+
+#### Shared Dimension Format
+
+Both modes produce dimensions with the same internal structure:
+- **candidates**: 2-4 possible values
 - **confidence**: `high` | `med` | `low` — how certain the AI is based on user text
 - **signals**: Direct quotes or inferences from the user's text
 
-Also extracts:
+Both also extract:
 - **hard_constraints**: Things the user explicitly required or excluded
 - **open_questions**: Ambiguities worth investigating, with `dimension`, `question`, `why_it_matters`
+
+#### How Context Is Built
+
+`_get_current_game_context()` gathers:
+1. **Current game files** from the project's `current_version_id`
+2. **Decided context** from the most recent `ExplorationSession`:
+   - Selected option details (title, core_loop, controls, mechanics, complexity, mobile_fit)
+   - Iteration count
+   - Hypothesis ledger (validated, rejected items)
 
 ### Stage B: Branch Synthesizer
 
 **Prompt**: `STAGE_B_BRANCH_PROMPT`
-**Input**: Dimensions JSON + memory context (past preferences)
+**Input**: Dimensions JSON + memory context (past preferences) + optional locked constraints
 **Output**: 3-6 divergent design branches
 
-Each branch is one **internally-consistent set of choices** across all 8 dimensions. Branches must differ on at least 2 major dimensions (controls / presentation / core_loop).
+Each branch is one **internally-consistent set of choices** across all dimensions (whether the fixed 8 from fresh mode or the dynamic ones from contextual mode). Branches must differ on at least 2 dimensions.
 
-If memory context shows user preferences, one branch is aligned with those preferences.
+Key behaviors:
+- If **locked** constraints are present (contextual mode), branches respect those decisions and only vary on the new dimensions.
+- If memory context shows user preferences, one branch is aligned with those preferences.
 
 Branch structure:
 ```json
@@ -295,22 +352,22 @@ The exploration lifecycle follows a strict state machine:
 
 ### 1. Explore: Decompose → Branch → Map
 
-User describes a game idea. The system runs Stages A → B → C:
+User describes a game idea (or a modification to an existing one). The system auto-detects whether a game already exists and runs Stages A → B → C accordingly.
+
+#### Example: Fresh Exploration (no existing game)
 
 ```
 User: "I want a fast mobile game where you tap to jump over things"
                     │
          ┌──────────▼───────────┐
-         │ Stage A: Decomposer  │
-         │ 8 dimensions:        │
+         │ Stage A (fresh)      │
+         │ 8 generic dimensions:│
          │  controls: single_key│ (high, "tap to jump")
          │  presentation: side  │ (med)
          │  core_loop: run_avoid│ (high, "jump over things")
          │  platform: mobile    │ (high, "mobile game")
          │  tone: exciting      │ (med, "fast")
          │  ...                 │
-         │ hard_constraints:    │
-         │  ["must be mobile"]  │
          └──────────┬───────────┘
                     │
          ┌──────────▼───────────┐
@@ -327,6 +384,43 @@ User: "I want a fast mobile game where you tap to jump over things"
          │ B1 → runner_endless  │ ← recommended
          │ B2 → platformer     │
          │ B3 → runner_endless  │
+         └──────────┬───────────┘
+                    │
+              Option Cards shown
+```
+
+#### Example: Contextual Exploration (game already exists)
+
+```
+Existing game: endless runner with tap-to-jump
+User: "add power-ups and a boss fight"
+                    │
+         ┌──────────▼───────────────────┐
+         │ Stage A (contextual)         │
+         │ locked:                      │
+         │   controls: touch_tap        │
+         │   presentation: side_scroller│
+         │   core_loop: run_avoid       │
+         │ new dimensions:              │
+         │   power_up_types (med)       │
+         │   boss_attack_pattern (low)  │
+         │   boss_frequency (low)       │
+         │   difficulty_scaling (med)   │
+         │   reward_feedback (low)      │
+         └──────────┬───────────────────┘
+                    │
+         ┌──────────▼───────────┐
+         │ Stage B: Branches    │
+         │ (respects locked)    │
+         │                      │
+         │ B1: Shield & Charge  │ (shield powerup, dash boss)
+         │ B2: Magnet Barrage   │ (magnet powerup, projectile boss)
+         │ B3: Score Rush       │ (multiplier powerup, area boss)
+         └──────────┬───────────┘
+                    │
+         ┌──────────▼───────────┐
+         │ Stage C: Mapper      │
+         │ All → runner_endless │ (same base template)
          └──────────┬───────────┘
                     │
               Option Cards shown
@@ -602,7 +696,7 @@ Returns raw HTML content for iframe preview. Used during the `previewing` state 
 ### GET `/api/v1/debug/openai_log`
 
 Returns all recent OpenAI call debug entries (max 50, ring buffer). Each entry includes:
-- `label`: Stage identifier (e.g. "A:decompose", "B:branches", "C:mapper", "D:customize", "iterate")
+- `label`: Stage identifier (e.g. "A:decompose(fresh)", "A:decompose(contextual)", "B:branches", "C:mapper", "D:customize", "iterate")
 - `timestamp`, `duration_ms`: Timing
 - `model`: OpenAI model used
 - `messages`: System + user messages sent
@@ -628,7 +722,7 @@ Migration: `b2c3d4e5f6g7_add_exploration_tables.py`
 | `id` | `INTEGER` PK | Auto-increment |
 | `project_id` | `UUID` FK→projects.id | CASCADE delete |
 | `user_input` | `TEXT` | Original game description |
-| `ambiguity_json` | `JSONB` | Stage A decomposition (8 dimensions + constraints + open questions) |
+| `ambiguity_json` | `JSONB` | Stage A decomposition (fresh: 8 fixed dims, or contextual: dynamic dims + locked) |
 | `state` | `VARCHAR(30)` | State machine value, default `explore_options` |
 | `selected_option_id` | `VARCHAR(100)` | Chosen option_id |
 | `hypothesis_ledger` | `JSONB` | `{validated[], rejected[], open_questions[]}` |
@@ -707,7 +801,8 @@ The entry point for new explorations.
 2. **Error Banner**: Shows API errors with dismiss button
 3. **Decomposition Display** (after Stage A):
    - Summary text
-   - **Dimension Grid**: 8 dimension cards, each showing:
+   - **Already Decided** (contextual mode only): Green tag list of locked decisions
+   - **Dimension Grid**: Dimension cards (8 fixed or 3-8 dynamic), each showing:
      - Dimension name (formatted from snake_case)
      - Confidence badge (color-coded: green=high, yellow=med, red=low)
      - Candidate tags
@@ -824,7 +919,7 @@ Each template entry contains:
 
 ## Data Structures
 
-### Decomposition (Stage A output)
+### Decomposition — Fresh Mode (Stage A output)
 
 ```json
 {
@@ -853,6 +948,59 @@ Each template entry contains:
       "dimension": "goals",
       "question": "Should the game be endless or have levels?",
       "why_it_matters": "Affects replay value and difficulty curve"
+    }
+  ]
+}
+```
+
+### Decomposition — Contextual Mode (Stage A output)
+
+```json
+{
+  "summary": "Add power-ups and a boss fight to the existing endless runner",
+  "locked": {
+    "description": "things already decided that should NOT change",
+    "items": [
+      "controls: touch_tap",
+      "presentation: side_scroller",
+      "core_loop: run_avoid (tap to jump over obstacles)",
+      "platform: mobile",
+      "tone: exciting"
+    ]
+  },
+  "dimensions": {
+    "power_up_types": {
+      "candidates": ["speed_boost", "shield", "magnet", "double_score"],
+      "confidence": "low",
+      "signals": ["user said power-ups but didn't specify types"]
+    },
+    "power_up_spawn": {
+      "candidates": ["random_interval", "fixed_positions", "after_milestones"],
+      "confidence": "low",
+      "signals": []
+    },
+    "boss_attack_pattern": {
+      "candidates": ["projectile_barrage", "charge_dash", "area_denial"],
+      "confidence": "low",
+      "signals": ["boss fight implies combat"]
+    },
+    "boss_frequency": {
+      "candidates": ["every_500_points", "every_60_seconds", "after_3_waves"],
+      "confidence": "low",
+      "signals": []
+    },
+    "difficulty_scaling": {
+      "candidates": ["faster_speed", "more_obstacles", "stronger_bosses"],
+      "confidence": "med",
+      "signals": ["existing game already has speed increase"]
+    }
+  },
+  "hard_constraints": ["must keep existing tap-to-jump controls"],
+  "open_questions": [
+    {
+      "dimension": "boss_attack_pattern",
+      "question": "Should the boss block the runner path or attack from a distance?",
+      "why_it_matters": "Affects whether boss fights interrupt the core running loop"
     }
   ]
 }
@@ -946,18 +1094,20 @@ Each template entry contains:
 
 1. **4-stage pipeline, not chat.** The system never asks clarifying questions. It decomposes → branches → maps → customizes in a single flow.
 
-2. **AI customizes code, not just selects templates.** Stage D rewrites the template to match the specific game design. Users see their game idea, not a generic demo.
+2. **Decomposition adapts to context.** Fresh explorations use generic 8 dimensions for broad design space coverage. Re-explorations on existing games generate specific, actionable dimensions (e.g. `power_up_types`, `boss_frequency`) while locking already-decided choices.
 
-3. **Branches must be meaningfully different.** Not parameter variations — branches differ on at least 2 major dimensions (controls, presentation, core_loop).
+3. **AI customizes code, not just selects templates.** Stage D rewrites the template to match the specific game design. Users see their game idea, not a generic demo.
 
-4. **Memory biases, never blocks.** Past preferences influence branch synthesis (Stage B), but all branches remain available.
+4. **Branches must be meaningfully different.** Not parameter variations — branches differ on at least 2 dimensions. In contextual mode, branches explore the new design space while respecting locked constraints.
 
-5. **Iterations are versioned and rollbackable.** Every `iterate` and `select_option` call creates a new `ProjectVersion`. No destructive edits.
+5. **Memory biases, never blocks.** Past preferences influence branch synthesis (Stage B), but all branches remain available.
 
-6. **Memory stores conclusions, not chat.** No raw conversation is persisted. Only structured, validated knowledge enters memory.
+6. **Iterations are versioned and rollbackable.** Every `iterate` and `select_option` call creates a new `ProjectVersion`. No destructive edits.
 
-7. **Single-file templates.** Each Phaser game is a self-contained HTML file with no external dependencies beyond the Phaser CDN.
+7. **Memory stores conclusions, not chat.** No raw conversation is persisted. Only structured, validated knowledge enters memory.
 
-8. **Every AI call is observable.** All OpenAI interactions are logged to an in-memory ring buffer (max 50 entries) and visible in the Debug tab with full request/response details.
+8. **Single-file templates.** Each Phaser game is a self-contained HTML file with no external dependencies beyond the Phaser CDN.
 
-9. **Hypothesis tracking is lightweight.** The ledger accumulates user requests as `open_questions`. Validated/rejected status is determined at memory-writing time by AI.
+9. **Every AI call is observable.** All OpenAI interactions are logged to an in-memory ring buffer (max 50 entries) and visible in the Debug tab with full request/response details.
+
+10. **Hypothesis tracking is lightweight.** The ledger accumulates user requests as `open_questions`. Validated/rejected status is determined at memory-writing time by AI.

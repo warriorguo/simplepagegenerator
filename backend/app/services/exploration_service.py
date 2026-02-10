@@ -88,6 +88,52 @@ Rules:
 - Return valid JSON only, no markdown."""
 
 
+# Stage A (contextual): when a game already exists, decompose based on current state
+STAGE_A_CONTEXTUAL_PROMPT = """You are an implementation-oriented requirement decomposer for Phaser web games.
+
+The user already has an existing game. Given their new request and the current game code,
+decompose the request into SPECIFIC implementation dimensions relevant to this change.
+
+Do NOT use generic dimensions like "controls" or "platform" if they are already decided.
+Instead, generate dimensions that capture the ACTUAL design decisions needed for this request.
+
+Current game code:
+{current_code}
+
+Already-decided context:
+{decided_context}
+
+Output JSON only:
+
+{{
+  "summary": "one-sentence restatement of what the user wants to change/add",
+  "locked": {{
+    "description": "things already decided that should NOT change",
+    "items": ["controls: touch_tap", "presentation: side_scroller", ...]
+  }},
+  "dimensions": {{
+    "<specific_dimension_name>": {{
+      "candidates": ["option_a", "option_b", "option_c"],
+      "confidence": "high|med|low",
+      "signals": ["quotes or inferences from user text"]
+    }}
+  }},
+  "hard_constraints": ["things the user explicitly required or excluded"],
+  "open_questions": [
+    {{"dimension": "...", "question": "...", "why_it_matters": "..."}}
+  ]
+}}
+
+Rules:
+- Generate 3-8 dimensions that are SPECIFIC to the request, not generic game design dimensions.
+- Dimension names should be descriptive snake_case: e.g. "power_up_types", "boss_attack_pattern",
+  "difficulty_curve", "spawn_frequency", "reward_structure", "animation_style".
+- Each dimension must have 2-4 candidates.
+- "locked" lists decisions already made in the existing game that should be preserved.
+- Focus on implementation choices, not high-level design.
+- Return valid JSON only, no markdown."""
+
+
 # Stage B: Branch Synthesizer — dimensions → 3-6 divergent branches
 STAGE_B_BRANCH_PROMPT = """You are a branch synthesizer for Phaser web game prototyping.
 
@@ -100,6 +146,8 @@ Memory context (user preferences from past explorations):
 Dimensions JSON:
 {dimensions_json}
 
+{locked_context}
+
 Output JSON only:
 {{
   "branches": [
@@ -107,14 +155,7 @@ Output JSON only:
       "branch_id": "B1",
       "name": "short catchy name",
       "picked": {{
-        "controls": "chosen value",
-        "presentation": "chosen value",
-        "core_loop": "one-sentence description of the 5-30s loop",
-        "goals": "chosen value",
-        "progression": "chosen value",
-        "systems": ["list of systems needed"],
-        "platform": "chosen value",
-        "tone": "chosen value"
+        "<dimension_name>": "chosen value or [list of values]"
       }},
       "why_this_branch": ["reasons this combination is interesting"],
       "risks": ["what might not work"],
@@ -124,10 +165,12 @@ Output JSON only:
 }}
 
 Rules:
-- Branches MUST differ on at least 2 major dimensions (controls / presentation / core_loop).
+- "picked" must include a choice for EVERY dimension key in the dimensions JSON.
+- Branches MUST differ on at least 2 dimensions.
 - Keep scope MVP-friendly: each branch should be prototypable with Phaser primitives, no external assets.
 - If user implies true 3D, propose isometric/pseudo-3D alternatives.
 - If memory context shows user preferences, make one branch aligned with those preferences.
+- If there is a "locked" section in the dimensions, respect those decisions — do NOT change locked items.
 - 3-6 branches total.
 - Return valid JSON only, no markdown."""
 
@@ -374,12 +417,34 @@ async def get_memory_context(
 # ─── Stage A: Requirement Decomposer ──────────────────────
 
 async def decompose_requirements(
-    client: AsyncOpenAI, user_input: str
+    client: AsyncOpenAI,
+    user_input: str,
+    current_code: dict[str, str] | None = None,
+    decided_context: str | None = None,
 ) -> dict:
-    """Stage A: Decompose user input into implementation dimensions."""
-    return await _call_openai_json(
-        client, STAGE_A_DECOMPOSER_PROMPT, user_input, label="A:decompose"
-    )
+    """Stage A: Decompose user input into implementation dimensions.
+
+    If current_code is provided (existing game), uses the contextual decomposer
+    that generates specific dimensions. Otherwise uses the generic 8-dimension
+    decomposer for initial game design.
+    """
+    if current_code:
+        # Contextual mode: game already exists
+        code_summary = ""
+        for fp, content in current_code.items():
+            code_summary += f"--- {fp} ---\n{content[:3000]}\n\n"
+        prompt = STAGE_A_CONTEXTUAL_PROMPT.format(
+            current_code=code_summary,
+            decided_context=decided_context or "No prior decisions recorded.",
+        )
+        return await _call_openai_json(
+            client, prompt, user_input, label="A:decompose(contextual)"
+        )
+    else:
+        # Fresh mode: no existing game
+        return await _call_openai_json(
+            client, STAGE_A_DECOMPOSER_PROMPT, user_input, label="A:decompose(fresh)"
+        )
 
 
 # ─── Stage B: Branch Synthesizer ──────────────────────────
@@ -390,9 +455,19 @@ async def synthesize_branches(
     memory_context: dict,
 ) -> list[dict]:
     """Stage B: Combine dimensions into 3-6 divergent branches."""
+    # Extract locked context if present (from contextual decomposer)
+    locked = dimensions_json.get("locked")
+    locked_context = ""
+    if locked:
+        locked_context = f"Locked decisions (do NOT change these):\n{json.dumps(locked, indent=2)}"
+
+    # Pass only the dimensions part to the branch synthesizer
+    dims = dimensions_json.get("dimensions", dimensions_json)
+
     prompt = STAGE_B_BRANCH_PROMPT.format(
         memory_context=json.dumps(memory_context, indent=2),
-        dimensions_json=json.dumps(dimensions_json, indent=2),
+        dimensions_json=json.dumps(dims, indent=2),
+        locked_context=locked_context,
     )
     result = await _call_openai_json(client, prompt, "Synthesize branches", label="B:branches")
     if isinstance(result, dict) and "branches" in result:
@@ -475,6 +550,62 @@ async def customize_template(
 
 # ─── Explore (full pipeline A → B → C) ───────────────────
 
+async def _get_current_game_context(
+    db: AsyncSession, project_id: uuid.UUID
+) -> tuple[dict[str, str] | None, str | None]:
+    """Check if the project has existing game code. Returns (files_dict, decided_context) or (None, None)."""
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project or not project.current_version_id:
+        return None, None
+
+    result = await db.execute(
+        select(ProjectFile).where(ProjectFile.version_id == project.current_version_id)
+    )
+    files = list(result.scalars().all())
+    if not files:
+        return None, None
+
+    files_dict = {f.file_path: f.content for f in files}
+
+    # Build decided context from the most recent exploration session
+    result = await db.execute(
+        select(ExplorationSession)
+        .where(ExplorationSession.project_id == project_id)
+        .order_by(ExplorationSession.created_at.desc())
+        .limit(1)
+    )
+    session = result.scalar_one_or_none()
+    decided_parts = []
+    if session:
+        if session.selected_option_id:
+            opt_result = await db.execute(
+                select(ExplorationOption).where(
+                    ExplorationOption.session_id == session.id,
+                    ExplorationOption.option_id == session.selected_option_id,
+                )
+            )
+            opt = opt_result.scalar_one_or_none()
+            if opt:
+                decided_parts.append(f"Game: {opt.title}")
+                decided_parts.append(f"Core loop: {opt.core_loop}")
+                decided_parts.append(f"Controls: {opt.controls}")
+                decided_parts.append(f"Mechanics: {', '.join(opt.mechanics) if isinstance(opt.mechanics, list) else opt.mechanics}")
+                decided_parts.append(f"Complexity: {opt.complexity}")
+                decided_parts.append(f"Mobile fit: {opt.mobile_fit}")
+        if session.iteration_count > 0:
+            decided_parts.append(f"Iterations done: {session.iteration_count}")
+        if session.hypothesis_ledger:
+            ledger = session.hypothesis_ledger
+            if ledger.get("validated"):
+                decided_parts.append(f"Validated: {', '.join(ledger['validated'][:5])}")
+            if ledger.get("rejected"):
+                decided_parts.append(f"Rejected: {', '.join(ledger['rejected'][:5])}")
+
+    decided_context = "\n".join(decided_parts) if decided_parts else None
+    return files_dict, decided_context
+
+
 async def explore(
     db: AsyncSession,
     client: AsyncOpenAI,
@@ -484,8 +615,15 @@ async def explore(
     template_catalog: list[dict] | None = None,
 ) -> dict:
     """Full explore pipeline: A:decompose → B:branches → C:mapper → persist."""
-    # Stage A
-    decomposition = await decompose_requirements(client, user_input)
+    # Check for existing game code
+    current_code, decided_context = await _get_current_game_context(db, project_id)
+
+    # Stage A: contextual if game exists, generic if fresh
+    decomposition = await decompose_requirements(
+        client, user_input,
+        current_code=current_code,
+        decided_context=decided_context,
+    )
 
     # Memory retrieval
     memory_ctx = await get_memory_context(db, project_id)

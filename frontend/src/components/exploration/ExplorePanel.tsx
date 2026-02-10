@@ -127,6 +127,17 @@ export default function ExplorePanel({ projectId }: Props) {
             <div className="decomp-summary">{decomp.summary}</div>
           )}
 
+          {decomp.locked && decomp.locked.items && decomp.locked.items.length > 0 && (
+            <div className="decomp-locked">
+              <h5>Already Decided</h5>
+              <div className="locked-items">
+                {decomp.locked.items.map((item, i) => (
+                  <span key={i} className="locked-tag">{item}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
           <h4>Implementation Dimensions</h4>
           <div className="decomp-grid">
             {Object.entries(decomp.dimensions).map(([key, dim]) => (
