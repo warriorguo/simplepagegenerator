@@ -64,6 +64,7 @@ Rules:
 - Each included dimension must have 2-4 candidates. More candidates = more ambiguity.
 - You may use the reference dimensions above, or create custom ones if needed (e.g. "enemy_behavior", "scoring_model").
 - "signals" are direct quotes or logical inferences from user text.
+- You have access to a search_memory tool that can retrieve past exploration memories, design decisions, and user preferences. Use it if you think prior context would help decompose the request.
 - Return valid JSON only, no markdown."""
 
 
@@ -113,6 +114,7 @@ Rules:
   "difficulty_curve", "spawn_frequency", "reward_structure", "animation_style".
 - "locked" lists decisions already made in the existing game that should be preserved.
 - Focus on implementation choices, not high-level design.
+- You have access to a search_memory tool that can retrieve past exploration memories, design decisions, and user preferences. Use it if prior decisions or patterns would help decompose the request.
 - Return valid JSON only, no markdown."""
 
 
@@ -153,6 +155,7 @@ Rules:
 - If user implies true 3D, propose isometric/pseudo-3D alternatives.
 - If memory context shows user preferences, make one branch aligned with those preferences.
 - If there is a "locked" section in the dimensions, respect those decisions — do NOT change locked items.
+- You have access to a search_memory tool that can retrieve past exploration memories and strategy paths. Use it if you want to check what worked or failed before.
 - 3-6 branches total.
 - Return valid JSON only, no markdown."""
 
@@ -354,6 +357,211 @@ def clear_debug_log() -> None:
     _debug_log.clear()
 
 
+# ─── Memory Tool for OpenAI Function Calling ──────────────
+
+MEMORY_TOOL_DEF = {
+    "type": "function",
+    "function": {
+        "name": "search_memory",
+        "description": (
+            "Search past exploration memories for relevant strategy paths, "
+            "design decisions, user preferences, validated/rejected hypotheses, "
+            "and lessons learned from previous game explorations."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "What to search for, e.g. 'runner game controls', "
+                        "'power-up design patterns', 'mobile tap games', "
+                        "'what was rejected before'"
+                    ),
+                },
+                "filter_type": {
+                    "type": "string",
+                    "enum": ["all", "design_decision", "exploration_finish"],
+                    "description": "Filter by memory type. 'all' returns everything.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
+async def _search_memory_for_tool(
+    db: AsyncSession, project_id: uuid.UUID, query: str, filter_type: str = "all"
+) -> str:
+    """Execute a memory search and return formatted results for the AI."""
+    result = await db.execute(
+        select(ExplorationMemoryNote)
+        .where(ExplorationMemoryNote.project_id == project_id)
+        .order_by(ExplorationMemoryNote.created_at.desc())
+        .limit(20)
+    )
+    notes = list(result.scalars().all())
+
+    # Also get user preferences
+    result = await db.execute(
+        select(UserPreference)
+        .where(UserPreference.project_id == project_id)
+        .order_by(UserPreference.updated_at.desc())
+        .limit(1)
+    )
+    pref = result.scalar_one_or_none()
+
+    query_lower = query.lower()
+    matched = []
+    for note in notes:
+        cj = note.content_json
+        if not isinstance(cj, dict):
+            continue
+        # Filter by type if specified
+        if filter_type != "all" and cj.get("type") != filter_type:
+            continue
+        # Simple relevance: check if query terms appear in content
+        note_text = json.dumps(cj).lower()
+        if any(term in note_text for term in query_lower.split()):
+            matched.append(cj)
+        elif not query_lower.strip():
+            matched.append(cj)
+
+    # If no keyword match, return all (up to limit)
+    if not matched:
+        matched = [n.content_json for n in notes[:10] if isinstance(n.content_json, dict)]
+        if filter_type != "all":
+            matched = [m for m in matched if m.get("type") == filter_type]
+
+    # Format results
+    parts = []
+    if pref:
+        parts.append(f"User Preferences: {json.dumps(pref.preference_json)}")
+
+    for i, m in enumerate(matched[:10]):
+        entry = f"\n--- Memory #{i+1}: {m.get('title', 'Untitled')} ---"
+        if m.get("summary"):
+            entry += f"\nSummary: {m['summary']}"
+        if m.get("type"):
+            entry += f"\nType: {m['type']}"
+        if m.get("selected_option"):
+            entry += f"\nSelected: {json.dumps(m['selected_option'])}"
+        if m.get("validated_hypotheses"):
+            entry += f"\nValidated: {m['validated_hypotheses']}"
+        if m.get("rejected_hypotheses"):
+            entry += f"\nRejected: {m['rejected_hypotheses']}"
+        if m.get("key_decisions"):
+            entry += f"\nKey decisions: {json.dumps(m['key_decisions'])}"
+        if m.get("pitfalls_and_guards"):
+            entry += f"\nPitfalls: {m['pitfalls_and_guards']}"
+        if m.get("dimensions"):
+            entry += f"\nDimensions explored: {m['dimensions']}"
+        if m.get("hard_constraints"):
+            entry += f"\nConstraints: {m['hard_constraints']}"
+        if m.get("user_preferences"):
+            entry += f"\nPreferences: {json.dumps(m['user_preferences'])}"
+        parts.append(entry)
+
+    if not parts:
+        return "No relevant memories found for this project."
+    return "\n".join(parts)
+
+
+async def _call_openai_with_tools(
+    client: AsyncOpenAI,
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    system: str,
+    user: str,
+    label: str = "",
+    max_tokens: int = 4000,
+) -> Any:
+    """Call OpenAI with memory tool support. Handles tool call loop."""
+    t0 = time.time()
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    entry: dict = {
+        "label": label,
+        "timestamp": t0,
+        "model": settings.openai_model,
+        "messages": list(messages),
+        "tool_calls": [],
+        "raw_response": None,
+        "parsed": None,
+        "error": None,
+        "duration_ms": 0,
+    }
+    try:
+        # First call with tools
+        response = await client.chat.completions.create(
+            model=settings.openai_model,
+            messages=messages,
+            tools=[MEMORY_TOOL_DEF],
+            temperature=0.7,
+            max_tokens=max_tokens,
+        )
+        msg = response.choices[0].message
+
+        # Handle tool calls (up to 3 rounds)
+        rounds = 0
+        while msg.tool_calls and rounds < 3:
+            rounds += 1
+            messages.append(msg)
+            for tc in msg.tool_calls:
+                entry["tool_calls"].append({
+                    "id": tc.id,
+                    "function": tc.function.name,
+                    "arguments": tc.function.arguments,
+                })
+                # Execute the tool
+                args = json.loads(tc.function.arguments)
+                tool_result = await _search_memory_for_tool(
+                    db, project_id,
+                    query=args.get("query", ""),
+                    filter_type=args.get("filter_type", "all"),
+                )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": tool_result,
+                })
+            # Continue the conversation
+            response = await client.chat.completions.create(
+                model=settings.openai_model,
+                messages=messages,
+                tools=[MEMORY_TOOL_DEF],
+                temperature=0.7,
+                max_tokens=max_tokens,
+            )
+            msg = response.choices[0].message
+
+        content = msg.content or "{}"
+        entry["raw_response"] = content
+        entry["usage"] = {
+            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+            "total_tokens": response.usage.total_tokens if response.usage else 0,
+        }
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+        parsed = json.loads(content)
+        entry["parsed"] = parsed
+        return parsed
+    except Exception as e:
+        entry["error"] = str(e)
+        raise
+    finally:
+        entry["duration_ms"] = round((time.time() - t0) * 1000)
+        _debug_log.append(entry)
+
+
 # ─── Memory Retrieval ───────────────────────────────────────
 
 async def get_memory_context(
@@ -400,6 +608,8 @@ async def get_memory_context(
 
 async def decompose_requirements(
     client: AsyncOpenAI,
+    db: AsyncSession,
+    project_id: uuid.UUID,
     user_input: str,
     current_code: dict[str, str] | None = None,
     decided_context: str | None = None,
@@ -409,6 +619,8 @@ async def decompose_requirements(
     If current_code is provided (existing game), uses the contextual decomposer
     that generates specific dimensions. Otherwise uses the generic 8-dimension
     decomposer for initial game design.
+
+    Uses _call_openai_with_tools so the model can search_memory for past decisions.
     """
     if current_code:
         # Contextual mode: game already exists
@@ -419,13 +631,13 @@ async def decompose_requirements(
             current_code=code_summary,
             decided_context=decided_context or "No prior decisions recorded.",
         )
-        return await _call_openai_json(
-            client, prompt, user_input, label="A:decompose(contextual)"
+        return await _call_openai_with_tools(
+            client, db, project_id, prompt, user_input, label="A:decompose(contextual)"
         )
     else:
         # Fresh mode: no existing game
-        return await _call_openai_json(
-            client, STAGE_A_DECOMPOSER_PROMPT, user_input, label="A:decompose(fresh)"
+        return await _call_openai_with_tools(
+            client, db, project_id, STAGE_A_DECOMPOSER_PROMPT, user_input, label="A:decompose(fresh)"
         )
 
 
@@ -433,10 +645,15 @@ async def decompose_requirements(
 
 async def synthesize_branches(
     client: AsyncOpenAI,
+    db: AsyncSession,
+    project_id: uuid.UUID,
     dimensions_json: dict,
     memory_context: dict,
 ) -> list[dict]:
-    """Stage B: Combine dimensions into 3-6 divergent branches."""
+    """Stage B: Combine dimensions into 3-6 divergent branches.
+
+    Uses _call_openai_with_tools so the model can search_memory for strategy paths.
+    """
     # Extract locked context if present (from contextual decomposer)
     locked = dimensions_json.get("locked")
     locked_context = ""
@@ -451,7 +668,9 @@ async def synthesize_branches(
         dimensions_json=json.dumps(dims, indent=2),
         locked_context=locked_context,
     )
-    result = await _call_openai_json(client, prompt, "Synthesize branches", label="B:branches")
+    result = await _call_openai_with_tools(
+        client, db, project_id, prompt, "Synthesize branches", label="B:branches"
+    )
     if isinstance(result, dict) and "branches" in result:
         return result["branches"]
     if isinstance(result, list):
@@ -602,7 +821,7 @@ async def explore(
 
     # Stage A: contextual if game exists, generic if fresh
     decomposition = await decompose_requirements(
-        client, user_input,
+        client, db, project_id, user_input,
         current_code=current_code,
         decided_context=decided_context,
     )
@@ -611,7 +830,7 @@ async def explore(
     memory_ctx = await get_memory_context(db, project_id)
 
     # Stage B
-    branches = await synthesize_branches(client, decomposition, memory_ctx)
+    branches = await synthesize_branches(client, db, project_id, decomposition, memory_ctx)
 
     # Stage C
     if template_catalog is None:
@@ -733,6 +952,78 @@ async def select_option(
         "rejected": [],
         "open_questions": [],
     }
+
+    # Write design-decision memory note
+    # Gather all options for this session to record what was available
+    all_opts_result = await db.execute(
+        select(ExplorationOption).where(ExplorationOption.session_id == session_id)
+    )
+    all_options = list(all_opts_result.scalars().all())
+    options_summary = []
+    for o in all_options:
+        options_summary.append({
+            "option_id": o.option_id,
+            "title": o.title,
+            "core_loop": o.core_loop,
+            "controls": o.controls,
+            "is_recommended": o.is_recommended,
+        })
+
+    decomposition = session.ambiguity_json or {}
+    memory_content = {
+        "title": f"Design Decision: {option_spec.get('title', option_id)}",
+        "summary": (
+            f"User requested: \"{session.user_input}\". "
+            f"Decomposed into {len(decomposition.get('dimensions', {}))} dimensions. "
+            f"Selected \"{option_spec.get('title', option_id)}\" from {len(all_options)} options."
+        ),
+        "type": "design_decision",
+        "user_input": session.user_input,
+        "decomposition_summary": decomposition.get("summary", ""),
+        "dimensions": list(decomposition.get("dimensions", {}).keys()),
+        "hard_constraints": decomposition.get("hard_constraints", []),
+        "locked": decomposition.get("locked"),
+        "options_considered": options_summary,
+        "selected_option": {
+            **option_spec,
+            "option_id": option_id,
+            "assumptions_to_validate": (
+                option_row.assumptions_to_validate
+                if option_row and option_row.assumptions_to_validate else []
+            ),
+        },
+        "user_preferences": {},
+        "final_choice": {
+            "option_id": option_id,
+            "why": (
+                "Recommended by system" if option_row and option_row.is_recommended
+                else "User selected manually"
+            ),
+        },
+        "validated_hypotheses": [],
+        "rejected_hypotheses": [],
+        "key_decisions": [{
+            "decision": f"Selected {option_spec.get('title', option_id)}",
+            "reason": f"Core loop: {option_spec.get('core_loop', '')}",
+            "evidence": f"Controls: {option_spec.get('controls', '')}, Complexity: {option_spec.get('complexity', '')}",
+        }],
+        "pitfalls_and_guards": [],
+        "refs": {
+            "exploration_session_id": session.id,
+            "stable_version_id": version.id,
+        },
+        "confidence": 0.6,
+    }
+
+    note = ExplorationMemoryNote(
+        project_id=project_id,
+        content_json=memory_content,
+        tags=_extract_tags(memory_content) + ["type:design_decision"],
+        confidence=0.6,
+        source_version_id=version.id,
+        source_session_id=session.id,
+    )
+    db.add(note)
 
     await db.commit()
 
