@@ -14,6 +14,7 @@
 - [Frontend Components](#frontend-components)
 - [Template Catalog](#template-catalog)
 - [Data Structures](#data-structures)
+- [Memory System](#memory-system)
 - [Design Principles](#design-principles)
 
 ---
@@ -28,6 +29,8 @@ The Exploration System is the core interaction model for SimplePageGenerator's g
 - **Adaptive Decomposer**: Stage A auto-detects context — uses generic 8 dimensions for a blank slate, or generates specific contextual dimensions when a game already exists.
 - **4-Stage AI Pipeline**: Decompose → Branch → Map → Customize. Each stage has a dedicated prompt and debug logging.
 - **AI-Customized Code**: Selecting an option doesn't just copy a preset demo — the template is rewritten by AI to match the specific game design.
+- **Memory Tool (Function Calling)**: Stage A and B can dynamically query past exploration memories via OpenAI tool use (`search_memory`), enabling the AI to recall strategy paths, design decisions, and lessons learned.
+- **Dual-Layer Memory**: Design decisions are recorded immediately on select (confidence 0.6); comprehensive memory is written on finish (confidence 0.85). Future explorations benefit from both.
 - **Closed-Loop Memory**: Each exploration session produces structured conclusions that influence future sessions.
 - **Versioned Iterations**: Every code modification creates an immutable `ProjectVersion` that can be rolled back.
 
@@ -68,12 +71,16 @@ The Exploration System is the core interaction model for SimplePageGenerator's g
 │  └── DELETE /openai_log                              │
 │                                                      │
 │  Service: exploration_service.py                     │
-│  ├── Stage A: decompose_requirements()  ←── OpenAI   │
-│  ├── Stage B: synthesize_branches()     ←── OpenAI   │
+│  ├── Stage A: decompose_requirements()  ←── OpenAI+tools│
+│  ├── Stage B: synthesize_branches()     ←── OpenAI+tools│
 │  ├── Stage C: map_demos()               ←── OpenAI   │
 │  ├── Stage D: customize_template()      ←── OpenAI   │
 │  ├── iterate()                          ←── OpenAI   │
 │  └── finish_exploration()               ←── OpenAI   │
+│                                                      │
+│  Memory Tool: search_memory (OpenAI function calling)│
+│  ├── _search_memory_for_tool()  → queries DB         │
+│  └── _call_openai_with_tools()  → tool call loop     │
 │                                                      │
 │  Templates: phaser_demos.py (6 game templates)       │
 │  Debug: _debug_log (in-memory ring buffer, max 50)   │
@@ -122,13 +129,15 @@ frontend/src/
 
 The explore flow chains four AI stages, each with a dedicated system prompt. Every OpenAI call is logged to an in-memory ring buffer (`deque(maxlen=50)`) accessible via the Debug tab.
 
+Stage A and B use **OpenAI function calling** (`_call_openai_with_tools`) with a `search_memory` tool, allowing the AI to dynamically query past exploration memories during decomposition and branch synthesis. Stage C and D use standard JSON calls (`_call_openai_json`).
+
 ```
 User Input
     │
     ▼
 ┌───────────────────────────────────────────────────────┐
 │ Stage A: Decomposer            decompose_requirements()│
-│                                                        │
+│                                      (with tools)      │
 │  ┌─ Fresh (no game code) ──┐  ┌─ Contextual ────────┐ │
 │  │ Reference 8 dims, only  │  │ Reads current code + │ │
 │  │ includes ambiguous ones │  │ past decisions       │ │
@@ -136,18 +145,19 @@ User Input
 │  │        (fresh)          │  │ + locked items       │ │
 │  └─────────────────────────┘  │ Label: A:decompose   │ │
 │                               │        (contextual)  │ │
-│  Dimension count driven by    └──────────────────────┘ │
-│  actual ambiguity (1 to N)                             │
-│                                max_tokens: 4000        │
+│  🔧 search_memory tool        └──────────────────────┘ │
+│  Dimension count driven by                             │
+│  actual ambiguity (1 to N)     max_tokens: 4000        │
 └───────────────────┬────────────────────────────────────┘
                     │ dimensions JSON (+ optional locked)
                     ▼
-┌───────────────────────────┐
-│ Stage B: Branch Synth     │  synthesize_branches()
-│ Dimensions + memory       │  Label: "B:branches"
-│ + locked constraints      │  max_tokens: 4000
-│ → 3-6 divergent branches  │
-└─────────┬─────────────────┘
+┌───────────────────────────────┐
+│ Stage B: Branch Synth         │  synthesize_branches()
+│ Dimensions + memory           │  (with tools)
+│ + locked constraints          │  Label: "B:branches"
+│ 🔧 search_memory tool         │  max_tokens: 4000
+│ → 3-6 divergent branches      │
+└─────────┬─────────────────────┘
           │ branches JSON
           ▼
 ┌───────────────────────────┐
@@ -164,12 +174,36 @@ User Input
 │ Stage D: Code Customizer  │  customize_template()
 │ Template code + option    │  Label: "D:customize"
 │ spec → customized game    │  max_tokens: 8000
+│ + design_decision memory  │  (written to DB)
 └───────────────────────────┘
 ```
 
+### search_memory Tool (OpenAI Function Calling)
+
+Stage A and B use `_call_openai_with_tools()` which provides a `search_memory` tool via OpenAI function calling. This allows the AI to **proactively query** past exploration memories during decomposition and branch synthesis.
+
+**Tool definition** (`MEMORY_TOOL_DEF`):
+```json
+{
+  "name": "search_memory",
+  "parameters": {
+    "query": "string — what to search for (e.g. 'runner game controls', 'mobile tap games')",
+    "filter_type": "string — 'all' | 'design_decision' | 'exploration_finish'"
+  }
+}
+```
+
+**Handler** (`_search_memory_for_tool`):
+1. Queries `ExplorationMemoryNote` (latest 20) + `UserPreference` from the database
+2. Filters by `filter_type` if specified (matches `content_json.type`)
+3. Keyword-matches query terms against note content
+4. Returns formatted text with: user preferences, memory summaries, selected options, validated/rejected hypotheses, key decisions, pitfalls, dimensions, constraints
+
+**Call loop**: Up to 3 tool call rounds per OpenAI request. Debug entries include `tool_calls` array with function name, arguments, and ID.
+
 ### Stage A: Requirement Decomposer (Dual-Mode)
 
-Stage A **auto-detects context** at runtime. If the project already has game code (a `current_version_id` with files), the contextual decomposer is used. Otherwise, the fresh decomposer runs.
+Stage A **auto-detects context** at runtime. If the project already has game code (a `current_version_id` with files), the contextual decomposer is used. Otherwise, the fresh decomposer runs. Both modes have access to the `search_memory` tool for recalling past decisions.
 
 #### Fresh Mode — `STAGE_A_DECOMPOSER_PROMPT`
 
@@ -251,6 +285,7 @@ Both modes also extract:
 
 **Prompt**: `STAGE_B_BRANCH_PROMPT`
 **Input**: Dimensions JSON + memory context (past preferences) + optional locked constraints
+**Tool access**: `search_memory` — can query past strategy paths and lessons learned
 **Output**: 3-6 divergent design branches
 
 Each branch is one **internally-consistent set of choices** across all dimensions (whether the fixed 8 from fresh mode or the dynamic ones from contextual mode). Branches must differ on at least 2 dimensions.
@@ -433,16 +468,35 @@ User: "add power-ups and a boss fight"
               Option Cards shown
 ```
 
-### 2. Preview & Select (with AI Customization)
+### 2. Preview & Select (with AI Customization + Design Decision Memory)
 
 - User clicks **Preview** on an option → iframe loads the raw template HTML via `GET /exploration/preview/{template_id}`
-- User clicks **Select** → triggers **Stage D: Code Customizer**:
+- User clicks **Select** → triggers **Stage D: Code Customizer** + **Design Decision Memory**:
   1. Template files are loaded
   2. Option spec (title, core_loop, controls, mechanics) is read from DB
   3. AI rewrites the template code to match the specific game design
   4. Customized code is saved as a new `ProjectVersion`
+  5. **Design decision memory note** is written immediately (see below)
 - Preview refreshes to show the **customized game**, not the generic template
 - State transitions to `committed`
+
+#### Design Decision Memory (on select)
+
+A `design_decision` memory note is written to `ExplorationMemoryNote` immediately when an option is selected — **without waiting for the user to finish exploration**. This ensures that design decisions are preserved even if the user never clicks "Finish Exploration".
+
+**Memory content** (`type: "design_decision"`, `confidence: 0.6`):
+- `user_input`: The original request
+- `decomposition_summary`: Stage A summary
+- `dimensions`: List of dimension keys explored
+- `hard_constraints`: From Stage A
+- `locked`: From contextual decomposer (if applicable)
+- `options_considered`: All options generated (ID, title, core_loop, controls, is_recommended)
+- `selected_option`: Full spec of the chosen option + assumptions_to_validate
+- `key_decisions`: What was selected and why
+
+**Tags**: Include `type:design_decision` + standard extracted tags (platform, input, pace, chosen option).
+
+This memory is queryable by the `search_memory` tool in future Stage A and B calls, allowing the AI to reference prior design decisions when decomposing new requests.
 
 ### 3. Iterate
 
@@ -454,17 +508,19 @@ User requests code modifications in natural language:
 4. The user request is appended to `hypothesis_ledger.open_questions`
 5. Preview refreshes automatically
 
-### 4. Finish & Write Memory
+### 4. Finish & Write Comprehensive Memory
 
 When the user clicks "Finish Exploration":
 
 1. GPT receives the full session data (user input, selected option, iterations, hypothesis ledger, decomposition)
-2. Generates a **structured memory** with: preferences, validated/rejected hypotheses, key decisions, pitfalls
+2. Generates a **comprehensive structured memory** with: preferences, validated/rejected hypotheses, key decisions, pitfalls (`confidence: 0.85`)
 3. Saves `ExplorationMemoryNote` to database
 4. Updates `UserPreference` record (upsert)
 5. State transitions to `stable`
 
-The memory then influences Stage B (branch synthesis) in all future explorations for this project.
+This is the **second layer** of memory — complementing the `design_decision` note (confidence 0.6) written at select time. The finish-time memory has higher confidence because it incorporates iteration results and hypothesis validation.
+
+Both memory types are queryable by the `search_memory` tool in future explorations and also feed into `get_memory_context()` for Stage B's static memory context.
 
 ---
 
@@ -706,10 +762,11 @@ Returns all recent OpenAI call debug entries (max 50, ring buffer). Each entry i
 - `label`: Stage identifier (e.g. "A:decompose(fresh)", "A:decompose(contextual)", "B:branches", "C:mapper", "D:customize", "iterate")
 - `timestamp`, `duration_ms`: Timing
 - `model`: OpenAI model used
-- `messages`: System + user messages sent
-- `raw_response`: Raw text from OpenAI
+- `messages`: System + user messages sent (for tool-enabled calls, includes tool call/response messages)
+- `tool_calls`: Array of tool invocations (present for Stage A and B), each with `id`, `function` name, `arguments`
+- `raw_response`: Raw text from OpenAI (final response after tool calls)
 - `parsed`: Parsed JSON result
-- `usage`: Token counts (prompt, completion, total)
+- `usage`: Token counts (prompt, completion, total) — from the final round
 - `error`: Error message if call failed
 
 ### DELETE `/api/v1/debug/openai_log`
@@ -757,14 +814,21 @@ Migration: `b2c3d4e5f6g7_add_exploration_tables.py`
 
 ### exploration_memory_notes
 
+Two types of memory notes are written:
+
+| Type | When Written | Confidence | Content |
+|---|---|---|---|
+| `design_decision` | On select (Stage D) | 0.6 | Decomposition, all options, selected option, constraints |
+| (finish-time) | On finish exploration | 0.85 | Preferences, validated/rejected hypotheses, key decisions, pitfalls |
+
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `INTEGER` PK | Auto-increment |
 | `project_id` | `UUID` FK→projects.id | CASCADE delete |
-| `content_json` | `JSONB` | Full `MemoryNoteContent` structure |
-| `tags` | `JSONB` | Searchable tags, e.g. `["platform:mobile"]` |
-| `confidence` | `FLOAT` | 0.0-1.0, default 0.8 |
-| `source_version_id` | `INTEGER` | The stable version at finish time |
+| `content_json` | `JSONB` | Full `MemoryNoteContent` structure; `content_json.type` distinguishes memory types |
+| `tags` | `JSONB` | Searchable tags, e.g. `["platform:mobile", "type:design_decision"]` |
+| `confidence` | `FLOAT` | 0.0-1.0 (0.6 for design_decision, ~0.85 for finish-time) |
+| `source_version_id` | `INTEGER` | The version at write time |
 | `source_session_id` | `INTEGER` FK→exploration_sessions.id | SET NULL on delete |
 | `created_at` | `TIMESTAMPTZ` | Auto |
 
@@ -1084,6 +1148,49 @@ Each template entry contains:
 }
 ```
 
+### DesignDecisionMemory (written on select, `type: "design_decision"`)
+
+```json
+{
+  "title": "Design Decision: Neon Dash Runner",
+  "summary": "User requested: \"fast mobile runner\". Decomposed into 3 dimensions. Selected \"Neon Dash Runner\" from 4 options.",
+  "type": "design_decision",
+  "user_input": "I want a fast mobile runner game",
+  "decomposition_summary": "A fast-paced mobile runner with tap controls",
+  "dimensions": ["controls", "presentation", "tone"],
+  "hard_constraints": ["must be mobile", "must use tap controls"],
+  "locked": null,
+  "options_considered": [
+    { "option_id": "opt_1", "title": "Neon Dash Runner", "core_loop": "tap to jump", "controls": "single tap", "is_recommended": true },
+    { "option_id": "opt_2", "title": "Sky Bounce", "core_loop": "tap to fly", "controls": "hold to rise", "is_recommended": false }
+  ],
+  "selected_option": {
+    "option_id": "opt_1",
+    "title": "Neon Dash Runner",
+    "core_loop": "tap to jump over obstacles",
+    "controls": "single tap",
+    "mechanics": ["jumping", "obstacles", "scoring"],
+    "complexity": "low",
+    "mobile_fit": "good",
+    "assumptions_to_validate": ["Tap timing feels responsive"]
+  },
+  "user_preferences": {},
+  "final_choice": { "option_id": "opt_1", "why": "Recommended by system" },
+  "validated_hypotheses": [],
+  "rejected_hypotheses": [],
+  "key_decisions": [
+    {
+      "decision": "Selected Neon Dash Runner",
+      "reason": "Core loop: tap to jump over obstacles",
+      "evidence": "Controls: single tap, Complexity: low"
+    }
+  ],
+  "pitfalls_and_guards": [],
+  "refs": { "exploration_session_id": 1, "stable_version_id": 5 },
+  "confidence": 0.6
+}
+```
+
 ### MemoryInfluence (returned during explore)
 
 ```json
@@ -1093,6 +1200,80 @@ Each template entry contains:
   "warnings": ["Avoid complex multi-touch", "Timer games rejected twice"],
   "suggested_direction_bias": { "input": "tap", "pace": "fast" }
 }
+```
+
+---
+
+## Memory System
+
+The exploration system has a **dual-layer memory architecture** and a **dynamic recall mechanism** via OpenAI function calling.
+
+### Memory Layers
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Memory Sources                        │
+│                                                          │
+│  Layer 1: Design Decision (on select)                   │
+│  ├── confidence: 0.6                                    │
+│  ├── type: "design_decision"                            │
+│  ├── Written immediately when user selects an option    │
+│  ├── Contains: decomposition, all options, selected     │
+│  │   option, constraints, locked context                │
+│  └── Purpose: capture decisions even if user never      │
+│      finishes exploration                               │
+│                                                          │
+│  Layer 2: Exploration Finish (on finish)                │
+│  ├── confidence: 0.85                                   │
+│  ├── type: (none — legacy format)                       │
+│  ├── Written by AI memory writer at finish time         │
+│  ├── Contains: preferences, validated/rejected          │
+│  │   hypotheses, key decisions, pitfalls                │
+│  └── Purpose: high-confidence, AI-synthesized lessons   │
+│                                                          │
+│  User Preferences (upsert on finish)                    │
+│  └── Aggregated preferences: platform, input, pace,     │
+│      session_length, difficulty, visual_density          │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                    Memory Consumers                      │
+│                                                          │
+│  1. search_memory tool (dynamic, Stage A+B)             │
+│     AI can query memories during decomposition and      │
+│     branch synthesis via OpenAI function calling.       │
+│     Keyword matching, filter by type, up to 3 rounds.   │
+│                                                          │
+│  2. get_memory_context() (static, Stage B)              │
+│     Pre-fetches latest 5 notes + user preferences.      │
+│     Passed as {memory_context} in Stage B prompt.       │
+│     Extracts: recurring_patterns, warnings,             │
+│     suggested_direction_bias.                            │
+│                                                          │
+│  3. ExplorationMemoryPanel (frontend)                    │
+│     Displays all memory notes to the user.               │
+└─────────────────────────────────────────────────────────┘
+```
+
+### search_memory Tool Flow
+
+When Stage A or B is called via `_call_openai_with_tools()`:
+
+1. OpenAI receives the system prompt (which mentions the tool is available) + the user message
+2. If the AI decides prior context would help, it calls `search_memory` with a query
+3. `_search_memory_for_tool()` queries the DB: latest 20 memory notes + user preferences
+4. Results are keyword-matched and formatted as text, returned as a tool response
+5. OpenAI processes the memory context and produces its JSON output
+6. Loop repeats up to 3 rounds if the AI makes additional tool calls
+
+Example: Fresh decomposition for "a mobile puzzle game"
+```
+AI → search_memory(query="puzzle game mobile", filter_type="all")
+DB → Returns: design_decision for a previous puzzle game,
+     user preferences (platform: mobile, input: tap)
+AI → Uses this context to produce dimensions that avoid
+     previously rejected approaches
 ```
 
 ---
@@ -1107,14 +1288,16 @@ Each template entry contains:
 
 4. **Branches must be meaningfully different.** Not parameter variations — branches differ on at least 2 dimensions. In contextual mode, branches explore the new design space while respecting locked constraints.
 
-5. **Memory biases, never blocks.** Past preferences influence branch synthesis (Stage B), but all branches remain available.
+5. **Memory biases, never blocks.** Past preferences influence branch synthesis (Stage B) both statically (pre-fetched context) and dynamically (search_memory tool calls), but all branches remain available.
 
 6. **Iterations are versioned and rollbackable.** Every `iterate` and `select_option` call creates a new `ProjectVersion`. No destructive edits.
 
-7. **Memory stores conclusions, not chat.** No raw conversation is persisted. Only structured, validated knowledge enters memory.
+7. **Dual-layer memory with progressive confidence.** Design decisions are captured immediately on select (confidence 0.6) to prevent information loss. Comprehensive, AI-synthesized conclusions are written at finish time (confidence 0.85). Both layers are queryable by the `search_memory` tool.
 
-8. **Single-file templates.** Each Phaser game is a self-contained HTML file with no external dependencies beyond the Phaser CDN.
+8. **Memory stores conclusions, not chat.** No raw conversation is persisted. Only structured, validated knowledge enters memory.
 
-9. **Every AI call is observable.** All OpenAI interactions are logged to an in-memory ring buffer (max 50 entries) and visible in the Debug tab with full request/response details.
+9. **Single-file templates.** Each Phaser game is a self-contained HTML file with no external dependencies beyond the Phaser CDN.
 
-10. **Hypothesis tracking is lightweight.** The ledger accumulates user requests as `open_questions`. Validated/rejected status is determined at memory-writing time by AI.
+10. **Every AI call is observable.** All OpenAI interactions are logged to an in-memory ring buffer (max 50 entries) and visible in the Debug tab with full request/response details. Tool-enabled calls (Stage A, B) also log `tool_calls` with function name and arguments.
+
+11. **Hypothesis tracking is lightweight.** The ledger accumulates user requests as `open_questions`. Validated/rejected status is determined at memory-writing time by AI.
