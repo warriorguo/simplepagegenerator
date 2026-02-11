@@ -20,6 +20,10 @@ from app.schemas.exploration import (
     MemoryNoteResponse,
     ExplorationStateResponse,
     ActiveSessionResponse,
+    PreviewOptionRequest,
+    PreviewOptionResponse,
+    FixPreviewRequest,
+    FixPreviewResponse,
 )
 from app.services import exploration_service
 from app.services.exploration_service import get_debug_log, clear_debug_log
@@ -152,6 +156,84 @@ async def list_memory_notes(
 ):
     """List all exploration memory notes for this project."""
     return await exploration_service.list_memory_notes(db, project_id)
+
+
+@router.post("/exploration/preview_option", response_model=PreviewOptionResponse)
+async def preview_option(
+    project_id: uuid.UUID,
+    data: PreviewOptionRequest,
+    db: AsyncSession = Depends(get_db),
+    client: AsyncOpenAI = Depends(get_openai_client),
+):
+    """Trigger AI-powered preview generation for an exploration option (Stage D+E)."""
+    try:
+        await exploration_service.preview_option(
+            db, client, data.session_id, data.option_id
+        )
+        return PreviewOptionResponse(
+            session_id=data.session_id,
+            option_id=data.option_id,
+            preview_ready=True,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/exploration/fix_preview", response_model=FixPreviewResponse)
+async def fix_preview(
+    project_id: uuid.UUID,
+    data: FixPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+    client: AsyncOpenAI = Depends(get_openai_client),
+):
+    """Fix runtime errors in a cached AI preview by feeding errors back to AI."""
+    try:
+        await exploration_service.fix_preview(
+            db, client, data.session_id, data.option_id,
+            [e.model_dump() for e in data.errors],
+        )
+        return FixPreviewResponse(
+            session_id=data.session_id,
+            option_id=data.option_id,
+            fixed=True,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+_ERROR_CATCHER_SCRIPT = """<script>
+(function(){
+  var errors=[];
+  window.onerror=function(msg,url,line,col,err){
+    if(errors.length<5){
+      errors.push({message:String(msg),line:line,col:col,stack:err?err.stack:''});
+      window.parent.postMessage({type:'preview-runtime-error',
+        errors:errors},'*');
+    }
+    return true;
+  };
+})();
+</script>"""
+
+
+@router.get("/exploration/preview_option/{session_id}/{option_id}")
+async def get_preview_option(
+    project_id: uuid.UUID,
+    session_id: int,
+    option_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve the cached AI-customized preview HTML for an exploration option."""
+    cache_key = f"preview:{session_id}:{option_id}"
+    html = await exploration_service.get_cached_preview(db, cache_key)
+    if not html:
+        raise HTTPException(status_code=404, detail="Preview not ready")
+    # Inject error catcher right after <head>
+    if "<head>" in html:
+        html = html.replace("<head>", "<head>" + _ERROR_CATCHER_SCRIPT, 1)
+    elif "<HEAD>" in html:
+        html = html.replace("<HEAD>", "<HEAD>" + _ERROR_CATCHER_SCRIPT, 1)
+    return HTMLResponse(content=html)
 
 
 @router.get("/exploration/preview/{template_id}")

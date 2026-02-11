@@ -143,3 +143,9 @@ export interface ActiveSessionResponse {
   hypothesis_ledger: HypothesisLedger | null
   iteration_count: number
 }
+
+export interface PreviewOptionResponse {
+  session_id: number
+  option_id: string
+  preview_ready: boolean
+}

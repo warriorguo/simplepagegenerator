@@ -29,6 +29,7 @@ def run_migrations_offline() -> None:
 OUR_TABLES = {
     "projects", "project_versions", "project_files", "chat_threads", "chat_messages", "project_memories",
     "exploration_sessions", "exploration_options", "exploration_memory_notes", "user_preferences",
+    "kv_cache",
 }
 
 

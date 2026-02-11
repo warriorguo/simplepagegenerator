@@ -7,6 +7,7 @@ import type {
   MemoryNote,
   ExplorationSessionState,
   ActiveSessionResponse,
+  PreviewOptionResponse,
 } from '../types/exploration'
 
 export function explore(projectId: string, userInput: string) {
@@ -51,6 +52,39 @@ export function listMemoryNotes(projectId: string) {
 
 export function getTemplatePreviewUrl(projectId: string, templateId: string) {
   return `/api/v1/projects/${projectId}/exploration/preview/${templateId}`
+}
+
+export function triggerPreviewOption(projectId: string, sessionId: number, optionId: string) {
+  return apiFetch<PreviewOptionResponse>(`/projects/${projectId}/exploration/preview_option`, {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId, option_id: optionId }),
+  })
+}
+
+export function getAiPreviewUrl(projectId: string, sessionId: number, optionId: string) {
+  return `/api/v1/projects/${projectId}/exploration/preview_option/${sessionId}/${optionId}`
+}
+
+export interface PreviewErrorInfo {
+  message: string
+  line?: number
+  col?: number
+  stack?: string
+}
+
+export function fixPreview(
+  projectId: string,
+  sessionId: number,
+  optionId: string,
+  errors: PreviewErrorInfo[],
+) {
+  return apiFetch<{ session_id: number; option_id: string; fixed: boolean }>(
+    `/projects/${projectId}/exploration/fix_preview`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId, option_id: optionId, errors }),
+    },
+  )
 }
 
 export function fetchDebugLog() {

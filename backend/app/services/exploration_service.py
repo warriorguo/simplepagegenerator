@@ -2,6 +2,7 @@ import json
 import time
 import uuid
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -9,12 +10,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.pipeline.prompts.game_feel import GAME_FEEL_POLICY
+from app.services.feel_defaults import get_feel_priors
 
 # ─── Debug Log ─────────────────────────────────────────────
 # In-memory ring buffer of recent OpenAI calls (max 50)
 _debug_log: deque[dict] = deque(maxlen=50)
 from app.models.exploration import (
-    ExplorationSession, ExplorationOption, ExplorationMemoryNote, UserPreference
+    ExplorationSession, ExplorationOption, ExplorationMemoryNote, UserPreference, KVCache
 )
 from app.models.project import Project
 from app.models.project_version import ProjectVersion
@@ -64,6 +67,22 @@ Rules:
 - Each included dimension must have 2-4 candidates. More candidates = more ambiguity.
 - You may use the reference dimensions above, or create custom ones if needed (e.g. "enemy_behavior", "scoring_model").
 - "signals" are direct quotes or logical inferences from user text.
+- CRITICAL — "X-like" references (e.g. "Super Mario like", "Flappy Bird clone", "Tetris style"):
+  When the user references a well-known game, lock BOTH its core mechanics AND its iconic
+  content catalog. This means:
+  (A) Mechanics → hard_constraints: side-scrolling, jump-to-defeat, coin-collecting, etc.
+  (B) Content catalog → hard_constraints: the game's signature items, enemies, power-ups,
+      level elements, etc. These are NOT dimensions — they ARE the game.
+  Example: "Super Mario like" locks ALL of the following as hard_constraints:
+    - Mechanics: side_scrolling, jump_to_defeat, coin_collecting, flag_end_level
+    - Power-ups: mushroom, fire_flower, star (the classic trio — NOT a dimension)
+    - Enemies: goomba, koopa_troopa (the iconic enemies — NOT a dimension)
+    - Blocks: breakable bricks, question blocks with power-ups
+    - Economy: coins → 1UP
+  The ONLY valid dimensions for an "X-like" request are things the reference game
+  genuinely does NOT determine: visual_style, difficulty_curve, level_count,
+  level_structure (linear vs branching), mobile_adaptation, audio_style, etc.
+  If you are unsure whether something is "part of the game" — it probably is. Lock it.
 - You have access to a search_memory tool that can retrieve past exploration memories, design decisions, and user preferences. Use it if you think prior context would help decompose the request.
 - Return valid JSON only, no markdown."""
 
@@ -114,15 +133,26 @@ Rules:
   "difficulty_curve", "spawn_frequency", "reward_structure", "animation_style".
 - "locked" lists decisions already made in the existing game that should be preserved.
 - Focus on implementation choices, not high-level design.
+- CRITICAL — "X-like" references (e.g. "Super Mario like", "Flappy Bird clone"):
+  When the user references a well-known game, lock BOTH its core mechanics AND its iconic
+  content catalog (enemies, power-ups, items, characters). Put them in hard_constraints
+  or locked, NOT as dimensions. The ONLY valid dimensions are things the reference game
+  genuinely does NOT determine (e.g. visual_style, difficulty_curve, level_structure).
+  If unsure whether something is "part of the game" — it probably is. Lock it.
 - You have access to a search_memory tool that can retrieve past exploration memories, design decisions, and user preferences. Use it if prior decisions or patterns would help decompose the request.
 - Return valid JSON only, no markdown."""
 
 
-# Stage B: Branch Synthesizer — dimensions → 3-6 divergent branches
+# Stage B: Branch Synthesizer — dimensions → divergent branches
 STAGE_B_BRANCH_PROMPT = """You are a branch synthesizer for Phaser web game prototyping.
 
-Given decomposed implementation dimensions, generate 3-6 divergent design branches.
+Given decomposed implementation dimensions, generate divergent design branches.
 Each branch is one internally-consistent set of choices across all dimensions.
+The number of branches should match the design space:
+- 1-2 dimensions → 2-3 branches
+- 3-4 dimensions → 3-4 branches
+- 5+ dimensions  → 4-6 branches
+Do NOT generate more branches than meaningful differences justify.
 
 Memory context (user preferences from past explorations):
 {memory_context}
@@ -150,13 +180,19 @@ Output JSON only:
 
 Rules:
 - "picked" must include a choice for EVERY dimension key in the dimensions JSON.
-- Branches MUST differ on at least 2 dimensions.
+- Branches should differ on the dimensions that matter most for gameplay feel and player experience.
+  If only 1-2 dimensions exist, branches MAY differ on just 1 key dimension — that is fine.
 - Keep scope MVP-friendly: each branch should be prototypable with Phaser primitives, no external assets.
 - If user implies true 3D, propose isometric/pseudo-3D alternatives.
 - If memory context shows user preferences, make one branch aligned with those preferences.
 - If there is a "locked" section in the dimensions, respect those decisions — do NOT change locked items.
+- IMPORTANT: Each branch must use the FULL content catalog, not subsets. If the game has
+  mushroom + fire_flower + star as power-ups, EVERY branch includes ALL THREE.
+  Do NOT create branches that differ by removing iconic items. Branches should differ
+  on structural/systemic dimensions (level_structure, difficulty_curve, progression_model),
+  not by cherry-picking subsets of the game's content.
 - You have access to a search_memory tool that can retrieve past exploration memories and strategy paths. Use it if you want to check what worked or failed before.
-- 3-6 branches total.
+- Scale branch count to the actual design space (see above). Never generate redundant branches that only differ cosmetically.
 - Return valid JSON only, no markdown."""
 
 
@@ -171,6 +207,9 @@ Available templates (template_id → description):
 
 Branches JSON:
 {branches_json}
+
+Design context (from requirement decomposition):
+{design_context}
 
 Output JSON only:
 {{
@@ -194,23 +233,38 @@ Output JSON only:
 }}
 
 Rules:
-- 3-6 options, one per branch.
+- One option per branch (match branch count).
 - Exactly one recommended option (set is_recommended=true on it AND fill recommended_option_id).
 - Options must be runnable immediately from the template with zero to minimal tweaks.
 - Prefer low/medium complexity templates during exploration.
+- CRITICAL — Template selection must respect the game genre established by the design context
+  (hard_constraints and locked items). If the context says "side_scrolling platformer with
+  jumping", ALL options must use a platformer template. Do NOT assign a shooter, runner, or
+  puzzle template to a branch that describes a platformer variant. Different branches of
+  the SAME genre should typically use the SAME template — the AI customizer (Stage E) will
+  handle the differences.
+- The "core_loop" and "controls" fields should reflect the established genre, not the template's
+  defaults. If all branches are platformers, write platformer-appropriate core loops.
 - Return valid JSON only, no markdown."""
 
 
-# Stage D: Code Customizer — template + option spec → customized game code
-STAGE_D_CUSTOMIZER_PROMPT = """You are a Phaser 3 game code customizer.
+# Stage D: Feel/Control Spec Generator — option spec → micro-spec for game feel
+STAGE_D_FEEL_SPEC_PROMPT = """You are a game feel architect for Phaser 3 prototypes.
 
-You will receive:
-1. A base template (complete HTML+JS Phaser game)
-2. A game design spec describing the target game
+Given a game design option, the user's intent, and prior knowledge (game-type
+defaults + user preferences), produce a structured micro-spec that defines
+exactly how the game should FEEL: motion model, input handling, camera behavior,
+boundaries, and visual feedback.
 
-Your job: rewrite the template code so it becomes the described game.
-Keep the same Phaser boilerplate structure (CDN import, config, scene lifecycle).
-Change the gameplay, controls, mechanics, visuals, text, and behavior to match the spec.
+== PRIOR: Game-Type Defaults ({game_type}) ==
+These are the baseline values for this game type. Use them as your starting
+point — deviate only with good reason (and explain in the "notes" fields).
+{game_type_defaults}
+
+== PRIOR: User Feel Profile (cross-project) ==
+This user's preferences learned from past explorations. Respect these unless
+the game design requires otherwise.
+{user_profile}
 
 Game design spec:
 - Title: {title}
@@ -222,16 +276,111 @@ Game design spec:
 
 User's original request: "{user_input}"
 
-Base template code:
-{template_code}
+Output a single JSON object with these sections (include only sections relevant
+to this game — omit sections that don't apply):
+
+{{
+  "movement_model": {{
+    "type": "accel_drag | direct_velocity | grid_snap | none",
+    "accel": 0,
+    "max_speed": 0,
+    "drag": 0,
+    "turn_smoothing": 0.0,
+    "notes": "why these values"
+  }},
+  "jump_model": {{
+    "enabled": true,
+    "coyote_time_ms": 0,
+    "jump_buffer_ms": 0,
+    "jump_velocity": 0,
+    "gravity": 0,
+    "notes": "why these values"
+  }},
+  "input": {{
+    "buffer_ms": 100,
+    "mobile_scheme": "tap_zones | virtual_buttons | swipe | touch_direct",
+    "touch_zone_min_px": 44,
+    "key_map": {{"up": "W/ArrowUp", "down": "S/ArrowDown"}},
+    "notes": "why this scheme"
+  }},
+  "camera": {{
+    "mode": "follow_player | fixed | pan_zones | none",
+    "lerp": 0.1,
+    "deadzone": [0, 0],
+    "bounds": "world | custom | none",
+    "notes": "why this setup"
+  }},
+  "bounds": {{
+    "world_bounds": true,
+    "entity_clamp": true,
+    "world_size": "screen | extended | infinite_scroll",
+    "notes": ""
+  }},
+  "visual_feedback": {{
+    "hit_flash_ms": 0,
+    "screen_shake": "none | light | medium | heavy",
+    "trail": "none | subtle | strong",
+    "score_popup": true,
+    "notes": "what feedback reinforces the core loop"
+  }},
+  "tuning": {{
+    "expose_in_debug_hud": true,
+    "presets": ["arcade", "floaty", "tight"],
+    "default_preset": "arcade"
+  }}
+}}
 
 Rules:
-- Output a JSON object mapping file_path to full file content: {{"index.html": "<!DOCTYPE html>..."}}
+- START from the game-type defaults above. Only change values when the design spec or user preferences demand it.
+- If the user profile shows a style_tendency (tight/floaty/arcade), bias values accordingly:
+  - tight: higher drag ratio, shorter buffer windows, lower lerp
+  - floaty: lower gravity, lower drag, longer coyote time
+  - arcade: balanced defaults, generous buffers
+- If the user profile lists dislikes (e.g. "camera shake", "high inertia"), respect them.
+- "notes" fields explain your reasoning AND any deviation from defaults (1 sentence each).
+- Omit entire sections that don't apply (e.g. no jump_model for a clicker game).
+- Values must be realistic Phaser 3 numbers (pixels/sec, ms, 0-1 ratios).
+- Return valid JSON only, no markdown."""
+
+
+# Stage E: Code Customizer — template + option spec + feel spec → customized game code
+STAGE_E_CUSTOMIZER_PROMPT = f"""You are a Phaser 3 game code customizer.
+
+You will receive:
+1. A base template (complete HTML+JS Phaser game)
+2. A game design spec describing the target game
+3. A **feel micro-spec** with exact numerical parameters for motion, input, camera, etc.
+
+Your job: rewrite the template code so it becomes the described game,
+using the feel micro-spec values for ALL game-feel parameters.
+
+{GAME_FEEL_POLICY}
+
+Game design spec:
+- Title: {{title}}
+- Core loop: {{core_loop}}
+- Controls: {{controls}}
+- Mechanics: {{mechanics}}
+- Complexity: {{complexity}}
+- Mobile fit: {{mobile_fit}}
+
+Feel micro-spec (use these EXACT values in your TUNING config):
+{{feel_spec}}
+
+User's original request: "{{user_input}}"
+
+Base template code:
+{{template_code}}
+
+Rules:
+- Output a JSON object mapping file_path to full file content: {{{{"index.html": "<!DOCTYPE html>..."}}}}
+- The `const TUNING` object MUST contain all numerical values from the feel micro-spec.
 - The game MUST be fully playable with zero external assets (use Phaser primitives: rectangles, circles, text, graphics).
 - Keep the CDN import: https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js
 - Maintain mobile support (touch controls, Scale.FIT).
 - Write complete, working code — do NOT leave placeholders or TODOs.
 - Match the core_loop and controls description as closely as possible.
+- Implement the Debug HUD showing values from the feel micro-spec.
 - Keep it simple but fun — this is a prototype.
 - Return valid JSON only, no markdown."""
 
@@ -275,20 +424,27 @@ Generate a JSON object:
 Return valid JSON only, no markdown."""
 
 
-ITERATE_PROMPT = """You are a Phaser game code modifier. Given the current game code and user's modification request, generate the updated complete file content.
+ITERATE_PROMPT = f"""You are a Phaser game code modifier. Given the current game code, the feel micro-spec, and user's modification request, generate the updated complete file content.
+
+{GAME_FEEL_POLICY}
+
+Feel micro-spec (the authoritative source for game-feel values — TUNING must match):
+{{feel_spec}}
 
 Current files:
-{current_files}
+{{current_files}}
 
-User request: "{user_input}"
+User request: "{{user_input}}"
 
 Rules:
-- Minimal changes only
+- Minimal changes only — but if existing code violates the Game Feel Policy or the feel micro-spec above, fix those violations alongside the requested change.
 - Keep Phaser structure consistent
 - Maintain the game's core loop
-- Only modify what the user asked for
+- Preserve the TUNING config object and Debug HUD
+- If the user's request changes game-feel parameters (e.g. "make jumping floatier"), update BOTH the relevant TUNING values AND note what changed.
+- Only modify what the user asked for (plus any game-feel fixes)
 - Return a JSON object mapping file_path to new content:
-{{"index.html": "<!DOCTYPE html>..."}}
+{{{{"index.html": "<!DOCTYPE html>..."}}}}
 
 Return valid JSON only, no markdown."""
 
@@ -684,6 +840,7 @@ async def map_demos(
     client: AsyncOpenAI,
     branches: list[dict],
     template_catalog: list[dict],
+    decomposition: dict | None = None,
 ) -> tuple[list[dict], str | None]:
     """Stage C: Map branches to template options. Returns (options, recommended_id)."""
     catalog_summary = [
@@ -698,9 +855,21 @@ async def map_demos(
         }
         for t in template_catalog
     ]
+    # Build design context from Stage A decomposition
+    design_ctx_parts = []
+    if decomposition:
+        if decomposition.get("summary"):
+            design_ctx_parts.append(f"Summary: {decomposition['summary']}")
+        if decomposition.get("hard_constraints"):
+            design_ctx_parts.append(f"Hard constraints: {json.dumps(decomposition['hard_constraints'])}")
+        if decomposition.get("locked"):
+            design_ctx_parts.append(f"Locked decisions: {json.dumps(decomposition['locked'])}")
+    design_context = "\n".join(design_ctx_parts) if design_ctx_parts else "No additional context."
+
     prompt = STAGE_C_MAPPER_PROMPT.format(
         template_catalog=json.dumps(catalog_summary, indent=2),
         branches_json=json.dumps(branches, indent=2),
+        design_context=design_context,
     )
     result = await _call_openai_json(client, prompt, "Map branches to demos", label="C:mapper")
     options = []
@@ -717,21 +886,56 @@ async def map_demos(
     return options, recommended_id
 
 
-# ─── Stage D: Code Customizer ────────────────────────────
+# ─── Stage D: Feel/Control Spec Generator ────────────────
+
+async def generate_feel_spec(
+    client: AsyncOpenAI,
+    db: AsyncSession,
+    option: dict,
+    user_input: str,
+    template_id: str,
+) -> dict:
+    """Stage D: Generate a structured micro-spec for game feel parameters.
+
+    Loads game-type defaults + user feel profile as priors before generation.
+    """
+    priors = await get_feel_priors(db, template_id)
+    prompt = STAGE_D_FEEL_SPEC_PROMPT.format(
+        game_type=priors["game_type"],
+        game_type_defaults=json.dumps(priors["game_type_defaults"], indent=2),
+        user_profile=json.dumps(priors["user_profile"], indent=2),
+        title=option.get("title", ""),
+        core_loop=option.get("core_loop", ""),
+        controls=option.get("controls", ""),
+        mechanics=json.dumps(option.get("mechanics", [])),
+        complexity=option.get("complexity", "medium"),
+        mobile_fit=option.get("mobile_fit", "good"),
+        user_input=user_input,
+    )
+    result = await _call_openai_json(
+        client, prompt, "Generate feel micro-spec", label="D:feel_spec"
+    )
+    if isinstance(result, dict):
+        return result
+    return {}
+
+
+# ─── Stage E: Code Customizer ────────────────────────────
 
 async def customize_template(
     client: AsyncOpenAI,
     template_files: list[dict],
     option: dict,
     user_input: str,
+    feel_spec: dict,
 ) -> dict[str, str]:
-    """Stage D: Customize template code to match the selected option's game design."""
+    """Stage E: Customize template code using the option spec AND feel micro-spec."""
     # Build template code context
     template_code = ""
     for f in template_files:
         template_code += f"--- {f['file_path']} ---\n{f['content']}\n\n"
 
-    prompt = STAGE_D_CUSTOMIZER_PROMPT.format(
+    prompt = STAGE_E_CUSTOMIZER_PROMPT.format(
         title=option.get("title", ""),
         core_loop=option.get("core_loop", ""),
         controls=option.get("controls", ""),
@@ -740,9 +944,10 @@ async def customize_template(
         mobile_fit=option.get("mobile_fit", "good"),
         user_input=user_input,
         template_code=template_code,
+        feel_spec=json.dumps(feel_spec, indent=2),
     )
     result = await _call_openai_json(
-        client, prompt, "Customize game code", label="D:customize", max_tokens=8000
+        client, prompt, "Customize game code", label="E:customize", max_tokens=8000
     )
     if isinstance(result, dict):
         return result
@@ -836,7 +1041,7 @@ async def explore(
     if template_catalog is None:
         from app.templates.phaser_demos import PHASER_DEMO_CATALOG
         template_catalog = PHASER_DEMO_CATALOG
-    options, recommended_id = await map_demos(client, branches, template_catalog)
+    options, recommended_id = await map_demos(client, branches, template_catalog, decomposition)
 
     # Persist
     session = ExplorationSession(
@@ -915,9 +1120,15 @@ async def select_option(
             "mobile_fit": option_row.mobile_fit,
         }
 
-    # Stage D: AI-customize the template code based on the option
+    # Stage D: Generate feel micro-spec
+    # Get template_id from the option
+    template_id = option_row.template_id if option_row else ""
+
+    feel_spec = await generate_feel_spec(client, db, option_spec, session.user_input, template_id)
+
+    # Stage E: AI-customize the template code using the feel spec
     customized = await customize_template(
-        client, template_files, option_spec, session.user_input
+        client, template_files, option_spec, session.user_input, feel_spec
     )
 
     version = ProjectVersion(
@@ -951,6 +1162,7 @@ async def select_option(
         "validated": [],
         "rejected": [],
         "open_questions": [],
+        "feel_spec": feel_spec,
     }
 
     # Write design-decision memory note
@@ -1007,6 +1219,7 @@ async def select_option(
             "reason": f"Core loop: {option_spec.get('core_loop', '')}",
             "evidence": f"Controls: {option_spec.get('controls', '')}, Complexity: {option_spec.get('complexity', '')}",
         }],
+        "feel_spec": feel_spec,
         "pitfalls_and_guards": [],
         "refs": {
             "exploration_session_id": session.id,
@@ -1066,12 +1279,17 @@ async def iterate(
     for f in current_files:
         files_context[f.file_path] = f.content
 
+    # Extract feel_spec from hypothesis_ledger (stored at select time)
+    ledger = session.hypothesis_ledger or {}
+    feel_spec = ledger.get("feel_spec", {})
+
     prompt = ITERATE_PROMPT.format(
         current_files=json.dumps(
             {fp: content[:3000] for fp, content in files_context.items()},
             indent=2
         ),
         user_input=user_input,
+        feel_spec=json.dumps(feel_spec, indent=2) if feel_spec else "No feel spec available — infer from the TUNING config in the current code.",
     )
     modifications = await _call_openai_json(client, prompt, user_input, label="iterate", max_tokens=8000)
 
@@ -1304,3 +1522,207 @@ async def list_memory_notes(
         .order_by(ExplorationMemoryNote.created_at.desc())
     )
     return list(result.scalars().all())
+
+
+# ─── Preview Option (AI-powered) ──────────────────────────
+
+async def get_cached_preview(db: AsyncSession, cache_key: str) -> str | None:
+    """Read cached preview HTML from KVCache. Returns None on miss or expiry."""
+    result = await db.execute(
+        select(KVCache).where(KVCache.cache_key == cache_key)
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        return None
+    if row.expires_at and row.expires_at < datetime.now(timezone.utc):
+        return None
+    return row.value_text
+
+
+async def preview_option(
+    db: AsyncSession,
+    client: "AsyncOpenAI",
+    session_id: int,
+    option_id: str,
+) -> str:
+    """Generate an AI-customized preview for an exploration option.
+
+    Uses Stage D (feel spec) + Stage E (code customizer) without persisting
+    project versions or changing session state.  Results are cached in KVCache
+    for 30 minutes.
+    """
+    cache_key = f"preview:{session_id}:{option_id}"
+
+    # Cache hit?
+    cached = await get_cached_preview(db, cache_key)
+    if cached is not None:
+        return cached
+
+    # Load session + option (read-only)
+    sess_result = await db.execute(
+        select(ExplorationSession).where(ExplorationSession.id == session_id)
+    )
+    session = sess_result.scalar_one_or_none()
+    if not session:
+        raise ValueError("Session not found")
+
+    opt_result = await db.execute(
+        select(ExplorationOption).where(
+            ExplorationOption.session_id == session_id,
+            ExplorationOption.option_id == option_id,
+        )
+    )
+    option_row = opt_result.scalar_one_or_none()
+    if not option_row:
+        raise ValueError("Option not found")
+
+    option_spec = {
+        "title": option_row.title,
+        "core_loop": option_row.core_loop,
+        "controls": option_row.controls,
+        "mechanics": option_row.mechanics,
+        "complexity": option_row.complexity,
+        "mobile_fit": option_row.mobile_fit,
+    }
+
+    # Resolve template files
+    from app.templates.phaser_demos import PHASER_DEMO_CATALOG
+    template_files = None
+    for t in PHASER_DEMO_CATALOG:
+        if t["template_id"] == option_row.template_id:
+            template_files = t["files"]
+            break
+    if not template_files:
+        raise ValueError("Template not found")
+
+    # Stage D: feel spec
+    feel_spec = await generate_feel_spec(
+        client, db, option_spec, session.user_input, option_row.template_id
+    )
+
+    # Stage E: customize template
+    customized = await customize_template(
+        client, template_files, option_spec, session.user_input, feel_spec
+    )
+
+    # Extract index.html from customized output
+    html = customized.get("index.html", "")
+    if not html:
+        # Fallback: use raw template
+        for f in template_files:
+            if f["file_path"] == "index.html":
+                html = f["content"]
+                break
+
+    # Upsert into KVCache
+    expires = datetime.now(timezone.utc) + timedelta(minutes=30)
+    existing = await db.execute(
+        select(KVCache).where(KVCache.cache_key == cache_key)
+    )
+    row = existing.scalar_one_or_none()
+    if row:
+        row.value_text = html
+        row.expires_at = expires
+        row.meta_json = {"session_id": session_id, "option_id": option_id}
+    else:
+        row = KVCache(
+            cache_key=cache_key,
+            value_text=html,
+            meta_json={"session_id": session_id, "option_id": option_id},
+            expires_at=expires,
+        )
+        db.add(row)
+
+    await db.commit()
+    return html
+
+
+# ─── Fix Preview (self-healing) ───────────────────────────
+
+FIX_PREVIEW_PROMPT = """You are a Phaser 3 code debugger. The following game code threw runtime errors in the browser.
+
+Runtime errors (collected from window.onerror):
+{errors}
+
+Current code:
+{code}
+
+Fix ALL the errors and return the corrected complete HTML file.
+
+Common Phaser pitfalls to check:
+- `this` context lost: standalone functions called from scene methods lose `this`.
+  Fix: pass scene as a parameter, or call with `.call(this, ...)`, or use arrow functions.
+- Accessing `this.time`, `this.input`, `this.physics` etc. outside scene methods — same cause.
+- Phaser objects used before `create()` finishes.
+- Missing null checks on `body`, `input`, `activePointer`.
+
+Rules:
+- Output a JSON object: {{"index.html": "<!DOCTYPE html>..."}}
+- Keep the complete game — do NOT simplify or remove features.
+- Only fix what is broken. Minimal changes.
+- Return valid JSON only, no markdown."""
+
+
+async def fix_preview(
+    db: AsyncSession,
+    client: "AsyncOpenAI",
+    session_id: int,
+    option_id: str,
+    errors: list[dict],
+) -> str:
+    """Fix runtime errors in a cached AI preview by feeding errors back to AI.
+
+    Returns the corrected HTML and updates the cache.
+    Tracks fix_attempts in meta_json to prevent infinite loops.
+    """
+    cache_key = f"preview:{session_id}:{option_id}"
+
+    result = await db.execute(
+        select(KVCache).where(KVCache.cache_key == cache_key)
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        raise ValueError("No cached preview to fix")
+
+    # Check fix attempt limit
+    meta = row.meta_json or {}
+    attempts = meta.get("fix_attempts", 0)
+    if attempts >= 2:
+        raise ValueError("Max fix attempts reached")
+
+    current_code = row.value_text
+
+    # Format errors for prompt
+    error_lines = []
+    for e in errors[:5]:
+        error_lines.append(
+            f"- Line {e.get('line', '?')}: {e.get('message', 'unknown error')}"
+        )
+        if e.get("stack"):
+            # First 3 stack lines only
+            stack_preview = "\n".join(e["stack"].split("\n")[:3])
+            error_lines.append(f"  Stack: {stack_preview}")
+
+    prompt = FIX_PREVIEW_PROMPT.format(
+        errors="\n".join(error_lines),
+        code=current_code,
+    )
+
+    fixed = await _call_openai_json(
+        client, prompt, "Fix the runtime errors",
+        label="fix_preview", max_tokens=8000
+    )
+
+    html = fixed.get("index.html", "")
+    if not html:
+        raise ValueError("AI did not return fixed code")
+
+    # Update cache
+    row.value_text = html
+    row.expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+    meta["fix_attempts"] = attempts + 1
+    meta["last_errors"] = [e.get("message", "") for e in errors[:5]]
+    row.meta_json = meta
+
+    await db.commit()
+    return html

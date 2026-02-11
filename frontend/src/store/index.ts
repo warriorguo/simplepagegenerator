@@ -69,6 +69,14 @@ interface AppState {
   setAmbiguity: (a: Ambiguity | null) => void
   memoryInfluence: MemoryInfluence | null
   setMemoryInfluence: (m: MemoryInfluence | null) => void
+  previewingOptionId: string | null
+  setPreviewingOptionId: (id: string | null) => void
+  isPreviewLoading: boolean
+  setIsPreviewLoading: (v: boolean) => void
+  previewError: string | null
+  setPreviewError: (e: string | null) => void
+  previewFixAttempts: number
+  setPreviewFixAttempts: (n: number) => void
   isExploring: boolean
   setIsExploring: (v: boolean) => void
   activeTab: 'explore' | 'iterate' | 'memory' | 'debug'
@@ -140,6 +148,14 @@ export const useStore = create<AppState>((set) => ({
   setAmbiguity: (a) => set({ ambiguity: a }),
   memoryInfluence: null,
   setMemoryInfluence: (m) => set({ memoryInfluence: m }),
+  previewingOptionId: null,
+  setPreviewingOptionId: (id) => set({ previewingOptionId: id }),
+  isPreviewLoading: false,
+  setIsPreviewLoading: (v) => set({ isPreviewLoading: v }),
+  previewError: null,
+  setPreviewError: (e) => set({ previewError: e }),
+  previewFixAttempts: 0,
+  setPreviewFixAttempts: (n) => set({ previewFixAttempts: n }),
   isExploring: false,
   setIsExploring: (v) => set({ isExploring: v }),
   activeTab: 'explore',
@@ -151,6 +167,10 @@ export const useStore = create<AppState>((set) => ({
       explorationOptions: [],
       selectedOptionId: null,
       previewingTemplateId: null,
+      previewingOptionId: null,
+      isPreviewLoading: false,
+      previewError: null,
+      previewFixAttempts: 0,
       hypothesisLedger: null,
       iterationCount: 0,
       ambiguity: null,

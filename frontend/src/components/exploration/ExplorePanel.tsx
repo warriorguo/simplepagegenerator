@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useStore } from '../../store'
 import OptionCard from './OptionCard'
-import { explore, selectOption } from '../../api/exploration'
+import { explore, selectOption, triggerPreviewOption } from '../../api/exploration'
 import type { Decomposition } from '../../types/exploration'
 
 interface Props {
@@ -23,6 +23,12 @@ export default function ExplorePanel({ projectId }: Props) {
     setExplorationState,
     setSelectedOptionId,
     setPreviewingTemplateId,
+    setPreviewingOptionId,
+    setIsPreviewLoading,
+    setPreviewError,
+    setPreviewFixAttempts,
+    previewingOptionId,
+    isPreviewLoading,
     setAmbiguity,
     setMemoryInfluence,
     setIsExploring,
@@ -57,10 +63,32 @@ export default function ExplorePanel({ projectId }: Props) {
     }
   }
 
-  const handlePreview = (templateId: string) => {
+  const handlePreview = async (optionId: string, templateId: string) => {
+    if (!sessionId) return
+    // Set preview state — show raw template immediately
+    setPreviewingOptionId(optionId)
     setPreviewingTemplateId(templateId)
+    setIsPreviewLoading(true)
+    setPreviewError(null)
+    setPreviewFixAttempts(0)
     setExplorationState('previewing')
     refreshPreview()
+
+    try {
+      // Trigger AI generation (Stage D+E)
+      await triggerPreviewOption(projectId, sessionId, optionId)
+      // Stale guard: check the option hasn't changed while we waited
+      if (useStore.getState().previewingOptionId !== optionId) return
+      // Switch to AI preview
+      setIsPreviewLoading(false)
+      refreshPreview()
+    } catch (err: any) {
+      if (useStore.getState().previewingOptionId !== optionId) return
+      const msg = err?.message || 'Preview generation failed'
+      setPreviewError(msg)
+      setIsPreviewLoading(false)
+      console.error('Preview generation failed:', err)
+    }
   }
 
   const handleSelect = async (optionId: string) => {
@@ -202,9 +230,11 @@ export default function ExplorePanel({ projectId }: Props) {
               <OptionCard
                 key={opt.option_id}
                 option={opt}
-                onPreview={() => handlePreview(opt.template_id)}
+                onPreview={() => handlePreview(opt.option_id, opt.template_id)}
                 onSelect={() => handleSelect(opt.option_id)}
                 disabled={loading}
+                isPreviewing={previewingOptionId === opt.option_id}
+                isPreviewLoading={previewingOptionId === opt.option_id && isPreviewLoading}
               />
             ))}
           </div>

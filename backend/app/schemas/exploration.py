@@ -107,3 +107,33 @@ class ActiveSessionResponse(BaseModel):
     selected_option_id: str | None
     hypothesis_ledger: dict | None
     iteration_count: int
+
+
+class PreviewOptionRequest(BaseModel):
+    session_id: int
+    option_id: str
+
+
+class PreviewOptionResponse(BaseModel):
+    session_id: int
+    option_id: str
+    preview_ready: bool
+
+
+class PreviewErrorInfo(BaseModel):
+    message: str
+    line: int | None = None
+    col: int | None = None
+    stack: str = ""
+
+
+class FixPreviewRequest(BaseModel):
+    session_id: int
+    option_id: str
+    errors: list[PreviewErrorInfo]
+
+
+class FixPreviewResponse(BaseModel):
+    session_id: int
+    option_id: str
+    fixed: bool

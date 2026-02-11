@@ -1,5 +1,5 @@
 import { useParams } from 'react-router-dom'
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import TopBar from '../components/layout/TopBar'
 import PreviewPanel from '../components/preview/PreviewPanel'
 import ExplorePanel from '../components/exploration/ExplorePanel'
@@ -8,6 +8,7 @@ import ExplorationMemoryPanel from '../components/exploration/ExplorationMemoryP
 import DebugPanel from '../components/exploration/DebugPanel'
 import VersionList from '../components/version/VersionList'
 import MemoryPanel from '../components/memory/MemoryPanel'
+import { getAiPreviewUrl, fixPreview } from '../api/exploration'
 import { useProject } from '../hooks/useProject'
 import { useMemories } from '../hooks/useMemories'
 import { useExplorationSession } from '../hooks/useExplorationSession'
@@ -27,9 +28,53 @@ export default function EditorPage() {
     setActiveTab,
     explorationState,
     previewingTemplateId,
+    previewingOptionId,
+    isPreviewLoading,
+    previewError,
+    previewFixAttempts,
     selectedOptionId,
     iterationCount,
+    sessionId,
+    previewKey,
+    refreshPreview,
+    setIsPreviewLoading,
+    setPreviewError,
+    setPreviewFixAttempts,
   } = useStore()
+
+  // Listen for runtime errors from preview iframe
+  const handleIframeMessage = useCallback(
+    async (event: MessageEvent) => {
+      if (event.data?.type !== 'preview-runtime-error') return
+      const state = useStore.getState()
+      if (!id || !state.sessionId || !state.previewingOptionId) return
+      if (state.isPreviewLoading) return // still generating, ignore
+      if (state.previewFixAttempts >= 2) {
+        setPreviewError(`Runtime error (auto-fix limit reached): ${event.data.errors?.[0]?.message || 'unknown'}`)
+        return
+      }
+
+      console.log('[preview-fix] Runtime errors detected, attempting auto-fix...', event.data.errors)
+      setIsPreviewLoading(true)
+      setPreviewError(null)
+
+      try {
+        await fixPreview(id, state.sessionId, state.previewingOptionId, event.data.errors)
+        setPreviewFixAttempts(state.previewFixAttempts + 1)
+        setIsPreviewLoading(false)
+        refreshPreview() // reload iframe with fixed code
+      } catch (err: any) {
+        setIsPreviewLoading(false)
+        setPreviewError(`Auto-fix failed: ${err?.message || 'unknown'}`)
+      }
+    },
+    [id],
+  )
+
+  useEffect(() => {
+    window.addEventListener('message', handleIframeMessage)
+    return () => window.removeEventListener('message', handleIframeMessage)
+  }, [handleIframeMessage])
 
   if (!id) return <div>Invalid project ID</div>
 
@@ -84,17 +129,36 @@ export default function EditorPage() {
             {isPreviewingTemplate ? (
               <div className="preview-panel">
                 <div className="preview-toolbar">
-                  <span className="preview-toolbar-label">Template Preview</span>
+                  <span className="preview-toolbar-label">
+                    {isPreviewLoading ? 'Generating AI Preview...' : 'AI Preview'}
+                  </span>
                   <div className="preview-mode-indicator exploring">
                     {previewingTemplateId}
                   </div>
                 </div>
                 <div className="preview-frame-container">
+                  {isPreviewLoading && (
+                    <div className="preview-loading-overlay">
+                      <div className="preview-spinner" />
+                      <span className="preview-loading-text">
+                        {previewFixAttempts > 0
+                          ? `Fixing runtime errors (attempt ${previewFixAttempts}/2)...`
+                          : 'Generating AI-customized game...'}
+                      </span>
+                    </div>
+                  )}
+                  {previewError && (
+                    <div className="preview-error-banner">{previewError}</div>
+                  )}
                   <iframe
-                    src={`/api/v1/projects/${id}/exploration/preview/${previewingTemplateId}`}
+                    src={
+                      !isPreviewLoading && previewingOptionId && sessionId
+                        ? `${getAiPreviewUrl(id, sessionId, previewingOptionId)}?v=${previewKey}`
+                        : `/api/v1/projects/${id}/exploration/preview/${previewingTemplateId}`
+                    }
                     sandbox="allow-scripts allow-same-origin"
-                    className="preview-frame"
-                    title="Template Preview"
+                    className={`preview-frame${isPreviewLoading ? ' preview-loading' : ''}`}
+                    title="AI Preview"
                   />
                 </div>
               </div>

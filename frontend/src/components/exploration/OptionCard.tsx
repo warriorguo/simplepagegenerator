@@ -5,9 +5,14 @@ interface Props {
   onPreview: () => void
   onSelect: () => void
   disabled?: boolean
+  isPreviewing?: boolean
+  isPreviewLoading?: boolean
 }
 
-export default function OptionCard({ option, onPreview, onSelect, disabled }: Props) {
+export default function OptionCard({ option, onPreview, onSelect, disabled, isPreviewing, isPreviewLoading }: Props) {
+  const previewLabel = isPreviewLoading ? 'Generating...' : isPreviewing ? 'Previewing' : 'Preview'
+  const btnClass = `option-preview-btn${isPreviewing ? ' previewing' : ''}`
+
   return (
     <div className={`option-card ${option.is_recommended ? 'recommended' : ''}`}>
       {option.is_recommended && <div className="option-badge">Recommended</div>}
@@ -41,8 +46,8 @@ export default function OptionCard({ option, onPreview, onSelect, disabled }: Pr
         </div>
       )}
       <div className="option-actions">
-        <button className="option-preview-btn" onClick={onPreview} disabled={disabled}>
-          Preview
+        <button className={btnClass} onClick={onPreview} disabled={disabled || isPreviewLoading}>
+          {previewLabel}
         </button>
         <button className="btn-primary option-select-btn" onClick={onSelect} disabled={disabled}>
           Select

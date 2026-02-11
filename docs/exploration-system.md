@@ -6,7 +6,7 @@
 
 - [Overview](#overview)
 - [Architecture](#architecture)
-- [AI Pipeline (4 Stages)](#ai-pipeline-4-stages)
+- [AI Pipeline (5 Stages)](#ai-pipeline-5-stages)
 - [State Machine](#state-machine)
 - [Core Flow](#core-flow)
 - [API Reference](#api-reference)
@@ -29,6 +29,8 @@ The Exploration System is the core interaction model for SimplePageGenerator's g
 - **Adaptive Decomposer**: Stage A auto-detects context — uses generic 8 dimensions for a blank slate, or generates specific contextual dimensions when a game already exists.
 - **4-Stage AI Pipeline**: Decompose → Branch → Map → Customize. Each stage has a dedicated prompt and debug logging.
 - **AI-Customized Code**: Selecting an option doesn't just copy a preset demo — the template is rewritten by AI to match the specific game design.
+- **AI-Powered Preview**: Clicking "Preview" runs Stage D+E to show an AI-customized game — not just the raw template. Results are cached in a generic `kv_cache` table (30-min TTL).
+- **Self-Healing Preview**: Runtime errors in previewed games are automatically caught via injected `window.onerror`, sent back to AI for fixing, and the iframe reloads with corrected code (up to 2 fix attempts).
 - **Memory Tool (Function Calling)**: Stage A and B can dynamically query past exploration memories via OpenAI tool use (`search_memory`), enabling the AI to recall strategy paths, design decisions, and lessons learned.
 - **Dual-Layer Memory**: Design decisions are recorded immediately on select (confidence 0.6); comprehensive memory is written on finish (confidence 0.85). Future explorations benefit from both.
 - **Closed-Loop Memory**: Each exploration session produces structured conclusions that influence future sessions.
@@ -62,6 +64,9 @@ The Exploration System is the core interaction model for SimplePageGenerator's g
 │  ├── POST /select_option                             │
 │  ├── POST /iterate                                   │
 │  ├── POST /finish_exploration                        │
+│  ├── POST /exploration/preview_option                │
+│  ├── POST /exploration/fix_preview                   │
+│  ├── GET  /exploration/preview_option/{s}/{o}        │
 │  ├── GET  /exploration/state/{session_id}            │
 │  ├── GET  /exploration/memory_notes                  │
 │  └── GET  /exploration/preview/{template_id}         │
@@ -74,7 +79,10 @@ The Exploration System is the core interaction model for SimplePageGenerator's g
 │  ├── Stage A: decompose_requirements()  ←── OpenAI+tools│
 │  ├── Stage B: synthesize_branches()     ←── OpenAI+tools│
 │  ├── Stage C: map_demos()               ←── OpenAI   │
-│  ├── Stage D: customize_template()      ←── OpenAI   │
+│  ├── Stage D: generate_feel_spec()      ←── OpenAI   │
+│  ├── Stage E: customize_template()      ←── OpenAI   │
+│  ├── preview_option()     (D+E, cached) ←── OpenAI   │
+│  ├── fix_preview()        (self-heal)   ←── OpenAI   │
 │  ├── iterate()                          ←── OpenAI   │
 │  └── finish_exploration()               ←── OpenAI   │
 │                                                      │
@@ -92,7 +100,8 @@ The Exploration System is the core interaction model for SimplePageGenerator's g
 │  ├── exploration_sessions                            │
 │  ├── exploration_options                             │
 │  ├── exploration_memory_notes                        │
-│  └── user_preferences                                │
+│  ├── user_preferences                                │
+│  └── kv_cache (preview HTML cache, 30-min TTL)       │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -107,7 +116,8 @@ backend/
 │   ├── routers/exploration.py         # FastAPI endpoints + debug router
 │   └── templates/phaser_demos.py      # 6 Phaser 3 game templates
 ├── alembic/versions/
-│   └── b2c3d4e5f6g7_add_exploration_tables.py
+│   ├── b2c3d4e5f6g7_add_exploration_tables.py
+│   └── c3d4e5f6g7h8_add_kv_cache_table.py
 
 frontend/src/
 ├── types/exploration.ts               # TypeScript interfaces
@@ -125,11 +135,11 @@ frontend/src/
 
 ---
 
-## AI Pipeline (4 Stages)
+## AI Pipeline (5 Stages)
 
-The explore flow chains four AI stages, each with a dedicated system prompt. Every OpenAI call is logged to an in-memory ring buffer (`deque(maxlen=50)`) accessible via the Debug tab.
+The explore flow chains five AI stages, each with a dedicated system prompt. Every OpenAI call is logged to an in-memory ring buffer (`deque(maxlen=50)`) accessible via the Debug tab.
 
-Stage A and B use **OpenAI function calling** (`_call_openai_with_tools`) with a `search_memory` tool, allowing the AI to dynamically query past exploration memories during decomposition and branch synthesis. Stage C and D use standard JSON calls (`_call_openai_json`).
+Stage A and B use **OpenAI function calling** (`_call_openai_with_tools`) with a `search_memory` tool, allowing the AI to dynamically query past exploration memories during decomposition and branch synthesis. Stages C, D, and E use standard JSON calls (`_call_openai_json`).
 
 ```
 User Input
@@ -167,15 +177,25 @@ User Input
 └─────────┬─────────────────┘
           │ options JSON
           ▼
-      (User selects)
+      (User previews / selects)
           │
           ▼
 ┌───────────────────────────┐
-│ Stage D: Code Customizer  │  customize_template()
-│ Template code + option    │  Label: "D:customize"
-│ spec → customized game    │  max_tokens: 8000
-│ + design_decision memory  │  (written to DB)
+│ Stage D: Feel Spec Gen    │  generate_feel_spec()
+│ Option spec + game-type   │  Label: "D:feel_spec"
+│ defaults + user prefs     │  max_tokens: 4000
+│ → feel micro-spec JSON    │
+└─────────┬─────────────────┘
+          │ feel_spec JSON
+          ▼
+┌───────────────────────────┐
+│ Stage E: Code Customizer  │  customize_template()
+│ Template code + option    │  Label: "E:customize"
+│ spec + feel spec          │  max_tokens: 8000
+│ → customized game code    │
 └───────────────────────────┘
+
+Stages D+E run on both Preview (cached, no state change) and Select (persisted as ProjectVersion).
 ```
 
 ### search_memory Tool (OpenAI Function Calling)
@@ -323,20 +343,56 @@ Branch structure:
 
 The mapper picks the closest template for each branch, noting what tweaks will be needed. Exactly one option is marked `is_recommended: true`.
 
-### Stage D: Code Customizer
+### Stage D: Feel/Control Spec Generator
 
-**Prompt**: `STAGE_D_CUSTOMIZER_PROMPT`
-**Input**: Template source code + option spec (title, core_loop, controls, mechanics, complexity, mobile_fit) + user's original request
+**Prompt**: `STAGE_D_FEEL_SPEC_PROMPT`
+**Label**: `D:feel_spec`
+**Input**: Option spec (title, core_loop, controls, mechanics, complexity, mobile_fit) + game-type defaults (from `get_feel_priors()`) + user feel profile + user's original request
+**Output**: JSON micro-spec defining game feel: movement model, jump model, input scheme, camera, bounds, visual feedback, tuning presets
+
+Key behaviors:
+- Starts from **game-type defaults** (loaded per template type) and deviates only with reason
+- Respects **user feel profile** (e.g. style_tendency: tight/floaty/arcade, dislikes)
+- Each section has a `notes` field explaining reasoning
+- Omits irrelevant sections (no `jump_model` for a clicker)
+- Values are realistic Phaser 3 numbers (pixels/sec, ms, 0-1 ratios)
+
+### Stage E: Code Customizer
+
+**Prompt**: `STAGE_E_CUSTOMIZER_PROMPT`
+**Label**: `E:customize`
+**Input**: Template source code + option spec + **feel micro-spec** (from Stage D) + user's original request
 **Output**: JSON mapping file_path to customized file content
 
-This stage runs when the user **selects** an option. Instead of copying the template verbatim, the AI rewrites the game code to:
+This stage runs during both **Preview** (cached in `kv_cache`, no state change) and **Select** (persisted as `ProjectVersion`). The AI rewrites the game code to:
 - Match the described core loop and controls
+- Apply the feel micro-spec values as a `const TUNING` config object
+- Implement a Debug HUD showing tuning values
 - Implement the specified mechanics
 - Update title, colors, and gameplay behavior
 - Maintain mobile support (touch controls, Scale.FIT)
 - Use only Phaser primitives (no external assets)
 
 Uses `max_tokens: 8000` to accommodate full game code output.
+
+### Self-Healing Preview (fix_preview)
+
+**Prompt**: `FIX_PREVIEW_PROMPT`
+**Label**: `fix_preview`
+
+When AI-generated preview code throws runtime errors:
+1. Injected `window.onerror` handler in the served HTML catches errors (up to 5)
+2. Errors are sent to the parent frame via `postMessage`
+3. Frontend calls `POST /exploration/fix_preview` with the errors
+4. AI receives the current code + error details and returns a fixed version
+5. Cache is updated, iframe reloads
+
+**Retry limit**: 2 fix attempts per preview (tracked in `kv_cache.meta_json.fix_attempts`).
+
+Common fixes the AI handles:
+- `this` context lost in standalone functions called from Phaser scene methods
+- Null access on `body`, `input`, `activePointer`
+- Phaser objects used before scene initialization
 
 ---
 
@@ -352,11 +408,11 @@ The exploration lifecycle follows a strict state machine:
                  ┌───────────▼────────────┐
                  │    explore_options      │  3-6 options generated
                  └───────────┬────────────┘
-                             │ user previews template
+                             │ user clicks Preview (POST /exploration/preview_option, Stage D+E)
                  ┌───────────▼────────────┐
-                 │      previewing        │  iframe shows raw template
-                 └───────────┬────────────┘
-                             │ POST /select_option (Stage D)
+                 │      previewing        │  iframe shows AI-customized game
+                 └───────────┬────────────┘  (cached in kv_cache, self-healing errors)
+                             │ POST /select_option (Stage D+E)
                  ┌───────────▼────────────┐
                  │      committed         │  AI-customized code saved
                  └───────────┬────────────┘
@@ -382,7 +438,7 @@ The exploration lifecycle follows a strict state machine:
 |---|---|---|---|
 | `idle` | No active exploration | — | Start new exploration |
 | `explore_options` | Options generated, user reviewing | A+B+C ran | Preview, Select |
-| `previewing` | User viewing raw template in iframe (frontend-only) | — | Select, Preview another |
+| `previewing` | User viewing AI-customized preview (Stage D+E, cached) | D+E ran (preview) | Select, Preview another |
 | `committed` | User selected an option, AI-customized code saved | D ran | Iterate, Finish |
 | `iterating` | User modifying game through iterations | Iterate prompt | Iterate more, Finish |
 | `memory_writing` | AI synthesizing session into memory (transient) | Memory writer | Wait |
@@ -470,14 +526,21 @@ User: "add power-ups and a boss fight"
 
 ### 2. Preview & Select (with AI Customization + Design Decision Memory)
 
-- User clicks **Preview** on an option → iframe loads the raw template HTML via `GET /exploration/preview/{template_id}`
-- User clicks **Select** → triggers **Stage D: Code Customizer** + **Design Decision Memory**:
+- User clicks **Preview** on an option → triggers **AI-powered preview generation**:
+  1. Raw template is shown immediately in iframe (placeholder while loading)
+  2. `POST /exploration/preview_option` runs Stage D (feel spec) + Stage E (code customizer)
+  3. Result is cached in `kv_cache` (key: `preview:{session_id}:{option_id}`, TTL: 30 min)
+  4. Iframe switches to the AI-customized game via `GET /exploration/preview_option/{session_id}/{option_id}`
+  5. If runtime errors occur, the **self-healing loop** auto-fixes code (up to 2 attempts)
+  6. Subsequent preview clicks on the same option load instantly from cache
+  7. No project versions are created, no session state is changed
+- User clicks **Select** → triggers **Stage D+E** again (independent generation) + **Design Decision Memory**:
   1. Template files are loaded
   2. Option spec (title, core_loop, controls, mechanics) is read from DB
   3. AI rewrites the template code to match the specific game design
   4. Customized code is saved as a new `ProjectVersion`
   5. **Design decision memory note** is written immediately (see below)
-- Preview refreshes to show the **customized game**, not the generic template
+- Preview refreshes to show the **customized game**
 - State transitions to `committed`
 
 #### Design Decision Memory (on select)
@@ -744,6 +807,59 @@ Finish exploration and write structured memory.
 }
 ```
 
+### POST `/exploration/preview_option`
+
+Trigger AI-powered preview generation (Stage D+E). Results are cached in `kv_cache`.
+
+**Request:**
+```json
+{
+  "session_id": 1,
+  "option_id": "opt_1"
+}
+```
+
+**Response:**
+```json
+{
+  "session_id": 1,
+  "option_id": "opt_1",
+  "preview_ready": true
+}
+```
+
+Returns instantly from cache on subsequent calls (30-min TTL). Does not create project versions or change session state.
+
+### GET `/exploration/preview_option/{session_id}/{option_id}`
+
+Serve the cached AI-customized preview HTML. Returns `text/html` with an injected `window.onerror` handler that posts runtime errors to the parent frame via `postMessage`.
+
+### POST `/exploration/fix_preview`
+
+Fix runtime errors in cached AI preview code. AI receives the current code + errors and returns a corrected version.
+
+**Request:**
+```json
+{
+  "session_id": 1,
+  "option_id": "opt_1",
+  "errors": [
+    { "message": "can't access property 'now', this.time is undefined", "line": 231, "col": 33, "stack": "..." }
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "session_id": 1,
+  "option_id": "opt_1",
+  "fixed": true
+}
+```
+
+Returns 400 if max fix attempts (2) exceeded.
+
 ### GET `/exploration/state/{session_id}`
 
 Query current session state.
@@ -754,7 +870,7 @@ List all memory notes for this project.
 
 ### GET `/exploration/preview/{template_id}`
 
-Returns raw HTML content for iframe preview. Used during the `previewing` state (before selection). Returns `text/html`.
+Returns raw template HTML content for iframe preview. Used as a placeholder while AI preview generates.
 
 ### GET `/api/v1/debug/openai_log`
 
@@ -777,7 +893,7 @@ Clear the debug log.
 
 ## Database Schema
 
-Migration: `b2c3d4e5f6g7_add_exploration_tables.py`
+Migrations: `b2c3d4e5f6g7_add_exploration_tables.py`, `c3d4e5f6g7h8_add_kv_cache_table.py`
 
 ### exploration_sessions
 
@@ -841,6 +957,19 @@ Two types of memory notes are written:
 | `preference_json` | `JSONB` | `{platform, input, pace, session_length, difficulty, visual_density}` |
 | `updated_at` | `TIMESTAMPTZ` | Auto, updates on change |
 
+### kv_cache
+
+Generic key-value cache table. Currently used for AI preview HTML caching. Reusable for other caching needs.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INTEGER` PK | Auto-increment |
+| `cache_key` | `VARCHAR(255)` | Unique, indexed. Format: `preview:{session_id}:{option_id}` |
+| `value_text` | `TEXT` | Cached content (HTML for previews) |
+| `meta_json` | `JSONB` | Optional metadata: `{session_id, option_id, fix_attempts, last_errors}` |
+| `expires_at` | `TIMESTAMPTZ` | TTL (30 min for previews). Null = no expiry |
+| `created_at` | `TIMESTAMPTZ` | Auto |
+
 ---
 
 ## Frontend Components
@@ -893,8 +1022,8 @@ Displays a single exploration option.
 - Details grid: Controls, Complexity (color-coded), Mobile Fit (color-coded)
 - Mechanics tags
 - Assumptions to validate (bulleted list)
-- **Preview** button → shows raw template in iframe (pre-customization preview)
-- **Select** button → triggers Stage D (AI customization), transitions to `committed`
+- **Preview** button → triggers AI preview (Stage D+E), shows loading state ("Generating..."), switches to "Previewing" when ready. Self-heals runtime errors automatically.
+- **Select** button → triggers Stage D+E (AI customization), transitions to `committed`
 
 ### IteratePanel (`components/exploration/IteratePanel.tsx`)
 
@@ -935,6 +1064,10 @@ sessionId: number | null               // active session
 explorationOptions: ExplorationOption[] // generated options
 selectedOptionId: string | null         // chosen option
 previewingTemplateId: string | null     // template in iframe
+previewingOptionId: string | null       // option being AI-previewed
+isPreviewLoading: boolean              // AI preview generation in progress
+previewError: string | null            // preview error message
+previewFixAttempts: number             // self-healing fix attempt count
 hypothesisLedger: HypothesisLedger | null
 iterationCount: number
 memoryNotes: MemoryNote[]
@@ -945,9 +1078,11 @@ activeTab: 'explore' | 'iterate' | 'memory' | 'debug'
 
 // Actions
 setExplorationState, setSessionId, setExplorationOptions,
-setSelectedOptionId, setPreviewingTemplateId, setHypothesisLedger,
-setIterationCount, setMemoryNotes, setAmbiguity, setMemoryInfluence,
-setIsExploring, setActiveTab, resetExploration
+setSelectedOptionId, setPreviewingTemplateId, setPreviewingOptionId,
+setIsPreviewLoading, setPreviewError, setPreviewFixAttempts,
+setHypothesisLedger, setIterationCount, setMemoryNotes,
+setAmbiguity, setMemoryInfluence, setIsExploring, setActiveTab,
+resetExploration
 ```
 
 ---
