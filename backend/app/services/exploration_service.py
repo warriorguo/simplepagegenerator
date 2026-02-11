@@ -517,7 +517,7 @@ async def _call_openai_json(
                 {"role": "user", "content": user},
             ],
             temperature=0.7,
-            max_tokens=max_tokens,
+            **settings.max_tokens_param(max_tokens),
         )
         content = response.choices[0].message.content or "{}"
         entry["raw_response"] = content
@@ -697,7 +697,7 @@ async def _call_openai_with_tools(
             messages=messages,
             tools=[MEMORY_TOOL_DEF],
             temperature=0.7,
-            max_tokens=max_tokens,
+            **settings.max_tokens_param(max_tokens),
         )
         msg = response.choices[0].message
 
@@ -730,7 +730,7 @@ async def _call_openai_with_tools(
                 messages=messages,
                 tools=[MEMORY_TOOL_DEF],
                 temperature=0.7,
-                max_tokens=max_tokens,
+                **settings.max_tokens_param(max_tokens),
             )
             msg = response.choices[0].message
 

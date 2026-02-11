@@ -77,7 +77,7 @@ async def run_pipeline(
                     {"role": "user", "content": message},
                 ],
                 temperature=0.7,
-                max_tokens=1000,
+                **settings.max_tokens_param(1000),
             )
             answer = response.choices[0].message.content or ""
             yield sse_token(answer)

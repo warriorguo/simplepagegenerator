@@ -31,7 +31,7 @@ async def fix_errors(
             messages=messages,
             tools=TOOL_DEFINITIONS,
             temperature=0.1,
-            max_tokens=16000,
+            **settings.max_tokens_param(16000),
         )
 
         choice = response.choices[0]

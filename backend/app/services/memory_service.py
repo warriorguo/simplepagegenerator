@@ -199,7 +199,7 @@ async def extract_memories_from_conversation(
         model=settings.openai_model,
         messages=messages,
         temperature=0.1,
-        max_tokens=500,
+        **settings.max_tokens_param(500),
     )
 
     content = response.choices[0].message.content or "[]"

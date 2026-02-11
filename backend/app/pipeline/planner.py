@@ -22,7 +22,7 @@ async def create_plan(
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
-        max_tokens=1000,
+        **settings.max_tokens_param(1000),
     )
 
     content = response.choices[0].message.content or "{}"
