@@ -4,12 +4,14 @@ import { useStore } from '../store'
 import type { ExplorationState } from '../types/exploration'
 
 /**
- * On mount, fetch the most recent active exploration session from the backend
- * and hydrate the Zustand store so exploration state survives page refreshes.
+ * On mount (or when projectId changes), reset exploration state then fetch
+ * the most recent active session from the backend to hydrate Zustand.
+ * This ensures switching between projects doesn't leak stale state.
  */
 export function useExplorationSession(projectId: string | undefined) {
-  const didRun = useRef(false)
+  const prevProjectId = useRef<string | undefined>(undefined)
   const {
+    resetExploration,
     setSessionId,
     setExplorationState,
     setExplorationOptions,
@@ -18,14 +20,15 @@ export function useExplorationSession(projectId: string | undefined) {
     setHypothesisLedger,
     setIterationCount,
     setActiveTab,
-    explorationState,
   } = useStore()
 
   useEffect(() => {
-    if (!projectId || didRun.current) return
-    // Only hydrate when the store is in default idle state
-    if (explorationState !== 'idle') return
-    didRun.current = true
+    if (!projectId) return
+    // Always reset when project changes (including first mount)
+    if (prevProjectId.current !== projectId) {
+      resetExploration()
+      prevProjectId.current = projectId
+    }
 
     getActiveSession(projectId)
       .then((data) => {
@@ -36,7 +39,6 @@ export function useExplorationSession(projectId: string | undefined) {
         setHypothesisLedger(data.hypothesis_ledger)
         setIterationCount(data.iteration_count)
 
-        // Map backend state to frontend ExplorationState
         const stateMap: Record<string, ExplorationState> = {
           explore_options: 'explore_options',
           previewing: 'explore_options',
@@ -46,13 +48,12 @@ export function useExplorationSession(projectId: string | undefined) {
         }
         setExplorationState(stateMap[data.state] || 'explore_options')
 
-        // Switch to iterate tab for post-commit states
         if (data.state === 'committed' || data.state === 'iterating') {
           setActiveTab('iterate')
         }
       })
       .catch(() => {
-        // 404 = no active session, stay idle
+        // 404 = no active session, stay idle (already reset above)
       })
   }, [projectId]) // eslint-disable-line react-hooks/exhaustive-deps
 }
