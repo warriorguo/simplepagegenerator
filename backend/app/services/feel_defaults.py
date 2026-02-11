@@ -488,3 +488,23 @@ async def get_feel_priors(
         "game_type_defaults": defaults,
         "user_profile": user_profile,
     }
+
+
+async def get_feel_priors_by_game_type(
+    db: AsyncSession, game_type: str
+) -> dict[str, Any]:
+    """Get combined feel priors by game_type directly (no template_id lookup).
+
+    Returns a dict with:
+    - game_type: the game type
+    - game_type_defaults: static baseline feel spec
+    - user_profile: cross-project user feel preferences
+    """
+    defaults = GAME_TYPE_DEFAULTS.get(game_type, GAME_TYPE_DEFAULTS["platformer"])
+    user_profile = await aggregate_user_feel_profile(db)
+
+    return {
+        "game_type": game_type,
+        "game_type_defaults": defaults,
+        "user_profile": user_profile,
+    }

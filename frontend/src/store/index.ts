@@ -57,8 +57,6 @@ interface AppState {
   setExplorationOptions: (opts: ExplorationOption[]) => void
   selectedOptionId: string | null
   setSelectedOptionId: (id: string | null) => void
-  previewingTemplateId: string | null
-  setPreviewingTemplateId: (id: string | null) => void
   hypothesisLedger: HypothesisLedger | null
   setHypothesisLedger: (h: HypothesisLedger | null) => void
   iterationCount: number
@@ -136,8 +134,6 @@ export const useStore = create<AppState>((set) => ({
   setExplorationOptions: (opts) => set({ explorationOptions: opts }),
   selectedOptionId: null,
   setSelectedOptionId: (id) => set({ selectedOptionId: id }),
-  previewingTemplateId: null,
-  setPreviewingTemplateId: (id) => set({ previewingTemplateId: id }),
   hypothesisLedger: null,
   setHypothesisLedger: (h) => set({ hypothesisLedger: h }),
   iterationCount: 0,
@@ -166,7 +162,6 @@ export const useStore = create<AppState>((set) => ({
       sessionId: null,
       explorationOptions: [],
       selectedOptionId: null,
-      previewingTemplateId: null,
       previewingOptionId: null,
       isPreviewLoading: false,
       previewError: null,

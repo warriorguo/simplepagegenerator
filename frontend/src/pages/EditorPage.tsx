@@ -27,7 +27,6 @@ export default function EditorPage() {
     activeTab,
     setActiveTab,
     explorationState,
-    previewingTemplateId,
     previewingOptionId,
     isPreviewLoading,
     previewError,
@@ -78,11 +77,11 @@ export default function EditorPage() {
 
   if (!id) return <div>Invalid project ID</div>
 
-  // Determine preview URL
-  const isPreviewingTemplate = explorationState === 'previewing' && previewingTemplateId
+  // Determine preview state
+  const isPreviewing = explorationState === 'previewing' && !!previewingOptionId
   const previewModeLabel = (() => {
-    if (explorationState === 'previewing' && previewingTemplateId) {
-      return `Exploring: ${previewingTemplateId}`
+    if (isPreviewing) {
+      return `Exploring: ${previewingOptionId}`
     }
     if (explorationState === 'committed' || explorationState === 'iterating') {
       return `Committed v${iterationCount + 1}${selectedOptionId ? ` (${selectedOptionId})` : ''}`
@@ -126,14 +125,14 @@ export default function EditorPage() {
         )}
         <div className="editor-layout">
           <div className="editor-preview">
-            {isPreviewingTemplate ? (
+            {isPreviewing ? (
               <div className="preview-panel">
                 <div className="preview-toolbar">
                   <span className="preview-toolbar-label">
                     {isPreviewLoading ? 'Generating AI Preview...' : 'AI Preview'}
                   </span>
                   <div className="preview-mode-indicator exploring">
-                    {previewingTemplateId}
+                    {previewingOptionId}
                   </div>
                 </div>
                 <div className="preview-frame-container">
@@ -143,7 +142,7 @@ export default function EditorPage() {
                       <span className="preview-loading-text">
                         {previewFixAttempts > 0
                           ? `Fixing runtime errors (attempt ${previewFixAttempts}/2)...`
-                          : 'Generating AI-customized game...'}
+                          : 'Generating AI game from scratch...'}
                       </span>
                     </div>
                   )}
@@ -154,7 +153,7 @@ export default function EditorPage() {
                     src={
                       !isPreviewLoading && previewingOptionId && sessionId
                         ? `${getAiPreviewUrl(id, sessionId, previewingOptionId)}?v=${previewKey}`
-                        : `/api/v1/projects/${id}/exploration/preview/${previewingTemplateId}`
+                        : 'about:blank'
                     }
                     sandbox="allow-scripts allow-same-origin"
                     className={`preview-frame${isPreviewLoading ? ' preview-loading' : ''}`}

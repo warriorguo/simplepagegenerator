@@ -22,7 +22,6 @@ export default function ExplorePanel({ projectId }: Props) {
     sessionId,
     setExplorationState,
     setSelectedOptionId,
-    setPreviewingTemplateId,
     setPreviewingOptionId,
     setIsPreviewLoading,
     setPreviewError,
@@ -63,11 +62,9 @@ export default function ExplorePanel({ projectId }: Props) {
     }
   }
 
-  const handlePreview = async (optionId: string, templateId: string) => {
+  const handlePreview = async (optionId: string) => {
     if (!sessionId) return
-    // Set preview state — show raw template immediately
     setPreviewingOptionId(optionId)
-    setPreviewingTemplateId(templateId)
     setIsPreviewLoading(true)
     setPreviewError(null)
     setPreviewFixAttempts(0)
@@ -230,7 +227,7 @@ export default function ExplorePanel({ projectId }: Props) {
               <OptionCard
                 key={opt.option_id}
                 option={opt}
-                onPreview={() => handlePreview(opt.option_id, opt.template_id)}
+                onPreview={() => handlePreview(opt.option_id)}
                 onSelect={() => handleSelect(opt.option_id)}
                 disabled={loading}
                 isPreviewing={previewingOptionId === opt.option_id}

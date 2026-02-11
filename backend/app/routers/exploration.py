@@ -3,11 +3,9 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from openai import AsyncOpenAI
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_openai_client
-from app.models.exploration import ExplorationOption
 from app.schemas.exploration import (
     ExploreRequest,
     ExploreResponse,
@@ -27,17 +25,14 @@ from app.schemas.exploration import (
 )
 from app.services import exploration_service
 from app.services.exploration_service import get_debug_log, clear_debug_log
-from app.templates.phaser_demos import PHASER_DEMO_CATALOG
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["exploration"])
 debug_router = APIRouter(prefix="/api/v1/debug", tags=["debug"])
 
 
-def _get_template_ids() -> list[str]:
-    return [t["template_id"] for t in PHASER_DEMO_CATALOG]
-
-
 def _get_template_files(template_id: str) -> list[dict] | None:
+    """Backward compat: look up template files for old preview endpoint."""
+    from app.templates.phaser_demos import PHASER_DEMO_CATALOG
     for t in PHASER_DEMO_CATALOG:
         if t["template_id"] == template_id:
             return t["files"]
@@ -53,8 +48,7 @@ async def explore(
 ):
     """Start exploration: A:decompose → B:branches → C:mapper → options."""
     result = await exploration_service.explore(
-        db, client, project_id, data.user_input, _get_template_ids(),
-        template_catalog=PHASER_DEMO_CATALOG,
+        db, client, project_id, data.user_input,
     )
     return result
 
@@ -66,24 +60,10 @@ async def select_option(
     db: AsyncSession = Depends(get_db),
     client: AsyncOpenAI = Depends(get_openai_client),
 ):
-    """Select an option: customize template with AI and create initial version."""
-    result = await db.execute(
-        select(ExplorationOption).where(
-            ExplorationOption.session_id == data.session_id,
-            ExplorationOption.option_id == data.option_id,
-        )
-    )
-    option = result.scalar_one_or_none()
-    if not option:
-        raise HTTPException(status_code=404, detail="Option not found")
-
-    template_files = _get_template_files(option.template_id)
-    if not template_files:
-        raise HTTPException(status_code=404, detail="Template not found")
-
+    """Select an option: generate game from scratch with AI and create initial version."""
     try:
         result = await exploration_service.select_option(
-            db, client, project_id, data.session_id, data.option_id, template_files
+            db, client, project_id, data.session_id, data.option_id,
         )
         return result
     except ValueError as e:

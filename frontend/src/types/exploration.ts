@@ -14,7 +14,8 @@ export interface ExplorationOption {
   controls: string
   mechanics: string[]
   engine: string
-  template_id: string
+  template_id: string    // stores game_type for new sessions, template_id for old
+  game_type?: string     // explicit game_type field
   complexity: string
   mobile_fit: string
   assumptions_to_validate: string[]
