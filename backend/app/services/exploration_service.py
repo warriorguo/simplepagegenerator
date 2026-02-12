@@ -46,6 +46,7 @@ Output JSON only:
 
 {{
   "summary": "one-sentence restatement of what the user wants",
+  "ambiguity_level": "none|low|high",
   "dimensions": {{
     "<dimension_name>": {{
       "candidates": ["option_a", "option_b"],
@@ -62,26 +63,32 @@ Output JSON only:
 Rules:
 - ONLY include dimensions where real ambiguity exists (2+ plausible candidates).
   If the user's intent is clear for a dimension, do NOT include it — put it in hard_constraints instead.
-- If the request is very specific, you may output just 1-2 dimensions. If it is very vague, output more.
-  There is no minimum or maximum — let the actual ambiguity decide.
+- If the request is very specific, you may output ZERO dimensions and an empty "dimensions": {{}}.
+  If it is very vague, output more. There is no minimum or maximum — let the actual ambiguity decide.
+- Include an "ambiguity_level" field: "none" (0 dimensions — request is crystal clear),
+  "low" (1-2 minor dimensions), or "high" (3+ dimensions with real design trade-offs).
 - Each included dimension must have 2-4 candidates. More candidates = more ambiguity.
 - You may use the reference dimensions above, or create custom ones if needed (e.g. "enemy_behavior", "scoring_model").
 - "signals" are direct quotes or logical inferences from user text.
-- CRITICAL — "X-like" references (e.g. "Super Mario like", "Flappy Bird clone", "Tetris style"):
+- CRITICAL — "X-like" or "classical X" references (e.g. "Super Mario like", "Flappy Bird clone",
+  "classical Tetris"):
   When the user references a well-known game, lock BOTH its core mechanics AND its iconic
-  content catalog. This means:
+  content catalog AND its game structure. This means:
   (A) Mechanics → hard_constraints: side-scrolling, jump-to-defeat, coin-collecting, etc.
   (B) Content catalog → hard_constraints: the game's signature items, enemies, power-ups,
       level elements, etc. These are NOT dimensions — they ARE the game.
-  Example: "Super Mario like" locks ALL of the following as hard_constraints:
+  (C) Game structure → hard_constraints: level structure, win conditions, progression.
+      "Classical Super Mario" means: single level, flagpole finish, side-scrolling.
+      These are NOT dimensions — they are part of the reference game's definition.
+  Example: "classical Super Mario like" locks ALL of the following as hard_constraints:
     - Mechanics: side_scrolling, jump_to_defeat, coin_collecting, flag_end_level
     - Power-ups: mushroom, fire_flower, star (the classic trio — NOT a dimension)
     - Enemies: goomba, koopa_troopa (the iconic enemies — NOT a dimension)
     - Blocks: breakable bricks, question blocks with power-ups
     - Economy: coins → 1UP
-  The ONLY valid dimensions for an "X-like" request are things the reference game
-  genuinely does NOT determine: visual_style, difficulty_curve, level_count,
-  level_structure (linear vs branching), mobile_adaptation, audio_style, etc.
+    - Structure: single linear level, flagpole goal, countdown timer
+  For a "classical X" request, set ambiguity_level to "none" with 0 dimensions.
+  The ONLY valid dimensions are cosmetic choices: visual_style, audio_style, etc.
   If you are unsure whether something is "part of the game" — it probably is. Lock it.
 - You have access to a search_memory tool that can retrieve past exploration memories, design decisions, and user preferences. Use it if you think prior context would help decompose the request.
 - Return valid JSON only, no markdown."""
@@ -106,6 +113,7 @@ Output JSON only:
 
 {{
   "summary": "one-sentence restatement of what the user wants to change/add",
+  "ambiguity_level": "none|low|high",
   "locked": {{
     "description": "things already decided that should NOT change",
     "items": ["controls: touch_tap", "presentation: side_scroller", ...]
@@ -124,20 +132,27 @@ Output JSON only:
 }}
 
 Rules:
-- ONLY include dimensions where real ambiguity exists (2+ plausible candidates).
-  If something is obvious from context, do NOT create a dimension for it.
-- If the request is very specific, you may output just 1 dimension. If it is vague, output more.
+- ONLY include dimensions where GENUINE GAMEPLAY AMBIGUITY exists (2+ plausible candidates
+  that the user could reasonably want either way).
+  If something is obvious from context or the user's request, do NOT create a dimension.
+- Implementation details are NOT dimensions. "physics_implementation", "engine_integration",
+  "visual_asset_source", "input_targets" are engineering choices, not design ambiguity.
+  Only create dimensions for PLAYER-FACING design decisions.
+- If the request is very specific, you may output ZERO dimensions and an empty "dimensions": {{}}.
   There is no minimum or maximum — let the actual ambiguity decide.
+- Include an "ambiguity_level" field: "none" (0 dimensions — request is crystal clear),
+  "low" (1-2 minor dimensions), or "high" (3+ dimensions with real design trade-offs).
 - Each included dimension must have 2-4 candidates.
 - Dimension names should be descriptive snake_case: e.g. "power_up_types", "boss_attack_pattern",
   "difficulty_curve", "spawn_frequency", "reward_structure", "animation_style".
 - "locked" lists decisions already made in the existing game that should be preserved.
-- Focus on implementation choices, not high-level design.
-- CRITICAL — "X-like" references (e.g. "Super Mario like", "Flappy Bird clone"):
-  When the user references a well-known game, lock BOTH its core mechanics AND its iconic
-  content catalog (enemies, power-ups, items, characters). Put them in hard_constraints
-  or locked, NOT as dimensions. The ONLY valid dimensions are things the reference game
-  genuinely does NOT determine (e.g. visual_style, difficulty_curve, level_structure).
+- Focus on player-facing design choices, not implementation details.
+- CRITICAL — "X-like" or "classical X" references (e.g. "Super Mario like", "Flappy Bird clone"):
+  When the user references a well-known game, lock its core mechanics, iconic content
+  catalog, AND game structure (level design, win conditions, progression) in hard_constraints
+  or locked, NOT as dimensions. For a "classical X" request, set ambiguity_level to "none"
+  with 0 dimensions. The ONLY valid dimensions are cosmetic choices the reference game
+  genuinely does NOT determine (e.g. visual_style, audio_style).
   If unsure whether something is "part of the game" — it probably is. Lock it.
 - You have access to a search_memory tool that can retrieve past exploration memories, design decisions, and user preferences. Use it if prior decisions or patterns would help decompose the request.
 - Return valid JSON only, no markdown."""
@@ -146,18 +161,21 @@ Rules:
 # Stage B: Branch Synthesizer — dimensions → divergent branches
 STAGE_B_BRANCH_PROMPT = """You are a game design director for Phaser web game prototyping.
 
-Your job: given decomposed design dimensions, invent genuinely DIFFERENT gameplay
-experiences — not just different values picked from the same columns.
+Your job: given decomposed design dimensions, produce gameplay branches.
+The number of branches must match the ACTUAL ambiguity in the request.
 
-Think like a game designer pitching 3 different games to a publisher.
-Each branch must answer: "What does the PLAYER DO differently? What makes this
-branch FEEL different moment-to-moment?"
+CRITICAL — Branch count guidance:
+- 0 dimensions (user intent is crystal clear, e.g. "Super Mario-like"):
+  → produce EXACTLY 1 branch that faithfully recreates the requested experience.
+  Do NOT invent variations — the user told you exactly what they want.
+- 1-2 dimensions → 2-3 branches with minor variations
+- 3-4 dimensions → 3-4 branches with meaningful differences
+- 5+ dimensions  → 4-6 branches with genuinely different experiences
+Do NOT generate more branches than the actual ambiguity justifies.
 
-Branch count guidance:
-- 1-2 dimensions → 2-3 branches
-- 3-4 dimensions → 3-4 branches
-- 5+ dimensions  → 4-6 branches
-Do NOT generate more branches than meaningful differences justify.
+When there ARE multiple branches (2+), each branch must answer:
+"What does the PLAYER DO differently? What makes this branch FEEL different
+moment-to-moment?"
 
 Memory context (user preferences from past explorations):
 {memory_context}
@@ -187,20 +205,23 @@ Output JSON only:
 }}
 
 Rules:
-- MOST IMPORTANT: Branches must differ in GAMEPLAY MECHANICS and PLAYER EXPERIENCE,
-  not just in cosmetic/stylistic dimensions (visual_style, art_direction, etc.).
-  Ask yourself: "If I close my eyes, can I tell which branch I'm playing just from
-  the controls and interactions?" If not, the branches are too similar.
+- If dimensions is empty (0 dimensions), produce exactly 1 branch. The branch
+  should be a faithful, comprehensive spec of the user's request. "picked" can be
+  an empty object {{}}. Do NOT invent artificial choices.
+- When there are 2+ branches:
+  * Branches must differ in GAMEPLAY MECHANICS and PLAYER EXPERIENCE,
+    not just in cosmetic/stylistic dimensions (visual_style, art_direction, etc.).
+    Ask yourself: "If I close my eyes, can I tell which branch I'm playing just from
+    the controls and interactions?" If not, the branches are too similar.
+  * "core_mechanics" must be DIFFERENT across branches. If two branches have the same
+    mechanics list, they are redundant — merge or redesign them.
+  * "gameplay_hook" must be unique per branch and describe a tangible gameplay difference.
 - "picked" must include a choice for EVERY dimension key in the dimensions JSON.
-- "core_mechanics" must be DIFFERENT across branches. If two branches have the same
-  mechanics list, they are redundant — merge or redesign them.
-- "gameplay_hook" must be unique per branch and describe a tangible gameplay difference.
 
 Anti-patterns (DO NOT do these):
+- Inventing 3 divergent branches when dimensions is empty or has only 1 entry.
+  If the user said "Super Mario-like", they want Super Mario — not 3 different platformers.
 - Assigning one candidate from each dimension column to each branch (cartesian product).
-  Example BAD: B1=retro+linear+easy, B2=modern+branching+hard, B3=3D+open+adaptive.
-  Example GOOD: B1=precision-platformer with timed gates, B2=exploration-collector with
-  hidden areas and unlockable abilities, B3=speedrun-racer with momentum and shortcuts.
 - Making branches that only differ on visual_style or difficulty_curve.
   These are cosmetic — the AI customizer handles them later.
 - Proposing true 3D or open-world when the engine is Phaser (2D only).
@@ -254,13 +275,14 @@ Output JSON only:
 }}
 
 Rules:
-- One option per branch (match branch count).
+- One option per branch (match branch count). If there is only 1 branch, produce 1 option.
 - Exactly one recommended option (set is_recommended=true on it AND fill recommended_option_id).
+  If there is only 1 option, it is automatically recommended.
 - game_type should reflect the branch's core mechanics and gameplay_hook.
   Use one of the standard types when it fits; use "custom" only for truly novel hybrids.
 - Prefer low/medium complexity during exploration.
 
-CRITICAL — Differentiation between options:
+CRITICAL — Differentiation between options (only applies when 2+ options):
 - Each option's "core_loop", "mechanics", and "controls" MUST be meaningfully different
   from every other option.
 - "core_loop" must describe the SPECIFIC player experience for THIS branch. Do NOT
@@ -852,9 +874,12 @@ async def synthesize_branches(
     """
     # Extract locked context if present (from contextual decomposer)
     locked = dimensions_json.get("locked")
+    hard_constraints = dimensions_json.get("hard_constraints", [])
     locked_context = ""
     if locked:
         locked_context = f"Locked decisions (do NOT change these):\n{json.dumps(locked, indent=2)}"
+    if hard_constraints:
+        locked_context += f"\nHard constraints: {json.dumps(hard_constraints)}"
 
     # Pass only the dimensions part to the branch synthesizer
     dims = dimensions_json.get("dimensions", dimensions_json)
@@ -1051,8 +1076,24 @@ async def explore(
     # Memory retrieval
     memory_ctx = await get_memory_context(db, project_id)
 
-    # Stage B
-    branches = await synthesize_branches(client, db, project_id, decomposition, memory_ctx)
+    # Fast path: if no real ambiguity, skip Stage B — synthesize a single branch inline
+    dims = decomposition.get("dimensions", {})
+    ambiguity_level = decomposition.get("ambiguity_level", "high" if len(dims) >= 3 else "low")
+    if ambiguity_level in ("none", "low") or len(dims) <= 1:
+        branches = [{
+            "branch_id": "B1",
+            "name": decomposition.get("summary", user_input)[:60],
+            "player_fantasy": f"Faithfully recreate: {user_input}",
+            "gameplay_hook": decomposition.get("summary", user_input),
+            "core_mechanics": [c for c in decomposition.get("hard_constraints", [])[:5]],
+            "picked": {},
+            "why_this_branch": ["User intent is unambiguous — build exactly what was requested"],
+            "risks": [],
+            "what_to_validate": [],
+        }]
+    else:
+        # Stage B: synthesize divergent branches
+        branches = await synthesize_branches(client, db, project_id, decomposition, memory_ctx)
 
     # Stage C
     options, recommended_id = await map_options(client, branches, decomposition)
@@ -1069,6 +1110,7 @@ async def explore(
 
     option_responses = []
     for opt in options:
+        game_type = opt.get("game_type", opt.get("template_id", "platformer"))
         # Store game_type in the template_id column (reused — column is a generic String)
         db_opt = ExplorationOption(
             session_id=session.id,
@@ -1077,13 +1119,16 @@ async def explore(
             core_loop=opt.get("core_loop", ""),
             controls=opt.get("controls", ""),
             mechanics=opt.get("mechanics", []),
-            template_id=opt.get("game_type", opt.get("template_id", "platformer")),
+            template_id=game_type,
             complexity=opt.get("complexity", "medium"),
             mobile_fit=opt.get("mobile_fit", "good"),
             assumptions_to_validate=opt.get("assumptions_to_validate", []),
             is_recommended=opt.get("is_recommended", False),
         )
         db.add(db_opt)
+        # Normalize response: ensure both template_id and game_type are present
+        opt["game_type"] = game_type
+        opt["template_id"] = game_type
         option_responses.append(opt)
 
     await db.commit()

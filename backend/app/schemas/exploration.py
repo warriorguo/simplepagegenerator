@@ -15,7 +15,8 @@ class OptionResponse(BaseModel):
     controls: str
     mechanics: list[str]
     engine: str = "Phaser"
-    template_id: str
+    template_id: str = ""        # stores game_type for new sessions
+    game_type: str = "platformer"
     complexity: str
     mobile_fit: str
     assumptions_to_validate: list[str]

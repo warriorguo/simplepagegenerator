@@ -52,9 +52,9 @@ class ExplorationOption(Base):
         Integer, ForeignKey("exploration_sessions.id", ondelete="CASCADE"), nullable=False
     )
     option_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
     core_loop: Mapped[str] = mapped_column(Text, nullable=False)
-    controls: Mapped[str] = mapped_column(String(255), nullable=False)
+    controls: Mapped[str] = mapped_column(Text, nullable=False)
     mechanics: Mapped[dict] = mapped_column(JSONB, nullable=False)
     template_id: Mapped[str] = mapped_column(String(100), nullable=False)
     complexity: Mapped[str] = mapped_column(String(20), nullable=False)
